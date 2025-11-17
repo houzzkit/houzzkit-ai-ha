@@ -182,4 +182,3 @@ class ClimateSetFanModeIntent(intent.IntentHandler):
         )
         return response
 
-
