@@ -23,19 +23,20 @@ _LOGGER = logging.getLogger(__name__)
 REPEAT_EVERYDAY = "everyday"
 REPEAT_WORKDAY = "weekday"
 REPEAT_COUNTDOWN = "count_down"
+REPEAT_OTHER = "others"
 
 class CreateAlarmClockIntent(intent.IntentHandler):
     """Handle 创建循环闹钟 intents."""
     # Type of intent to handle
     intent_type = "AlarmClock"
     # description = "Create Alarm Clock "
-    description = """
-    Create Alarm Clock 用于创建各种类型的闹钟，包括每天闹钟、工作日闹钟和倒计时闹钟。
-    示例用法:
-    - 创建名为"起床闹钟"的每天7:30闹钟
-    - 创建名为"午休提醒"的1小时倒计时
-    - 创建名为"会议提醒"的工作日14:00闹钟
-    """
+    description =(
+    "Create Alarm Clock 用于创建各种类型的闹钟，包括每天闹钟、工作日闹钟和倒计时闹钟。"
+    "示例用法:"
+    "- 创建名为'起床闹钟'的每天7:30闹钟"
+    "- 创建名为'午休提醒'的1小时倒计时"
+    "- 创建名为'会议提醒'的工作日14:00闹钟"
+    )
     @property
     def slot_schema(self) -> dict | None:
         """返回验证 schema"""
@@ -46,41 +47,39 @@ class CreateAlarmClockIntent(intent.IntentHandler):
                 description="""
                 闹钟类型:
                 - everyday: 每天重复的闹钟，需要设置trigger_time
-                - weekday: 工作日重复的闹钟，需要设置trigger_time  
+                - weekday: 工作日重复的闹钟，时间范围事，需要设置trigger_time  
                 - count_down: 倒计时闹钟，需要设置hour,minute,second
+                - others: 特定日期的闹钟，例如"明天早上7点"、"下周一8点"、"12月25日9点"等
                 """
-                ): vol.All(cv.ensure_list, [vol.In([REPEAT_EVERYDAY, REPEAT_WORKDAY, REPEAT_COUNTDOWN])]),
+                ): vol.All(cv.ensure_list, [vol.In([REPEAT_EVERYDAY, REPEAT_WORKDAY, REPEAT_COUNTDOWN, REPEAT_OTHER])]),
             # vol.Required("trigger_time"): cv.string,
             vol.Optional(
                 "trigger_time",
-                description="""
-                触发时间，用于everyday和weekday类型的闹钟
-                格式: "HH:MM" 或 "HH:MM:SS"
-                示例: "07:30" 或 "19:45:00"
-                当type为everyday或weekday时，此字段为必填
-                """
+                description=(
+                "触发时间，用于everyday和weekday类型的闹钟"
+                "格式: 'HH:MM' 或 'HH:MM:SS'"
+                "示例: '07:30' 或 '19:45:00'"
+                "当type为everyday或weekday时，此字段为必填"
+                )
                 ): cv.string,
             vol.Optional(
                 "hour",
-                description="""
-                小时数，用于count_down类型的倒计时闹钟
-                范围: 0-23
-                当type为count_down时，此字段为必填
-                示例: 1 (表示1小时)
-                """
+                description = (
+                "小时数，用于count_down类型的倒计时闹钟"
+                "当type为count_down时，此字段为必填"
+                "示例: 1 (表示1小时)"
+                )    
                 ): vol.All(
                 vol.Coerce(int),
                 vol.Range(min=0, max=23)
             ),
             vol.Optional(
                 "minute",
-                 description=
-                 """
-                分钟数，用于count_down类型的倒计时闹钟
-                范围: 0-59
-                当type为count_down时，此字段为必填
-                示例: 30 (表示30分钟)
-                """
+                 description= ("分钟数，用于count_down类型的倒计时闹钟"
+                 "范围: 0-59"
+                 "当type为count_down时，此字段为必填"
+                 "示例: 30 (表示30分钟)"
+                 )                 
                 ): vol.All(
                 vol.Coerce(int),
                 vol.Range(min=0, max=59)
@@ -88,12 +87,11 @@ class CreateAlarmClockIntent(intent.IntentHandler):
             vol.Optional(
                 "second", 
                 description=
-                """
-                秒数，用于count_down类型的倒计时闹钟
-                范围: 0-59
-                当type为count_down时，此字段为必填
-                示例: 0 (表示0秒)
-                """
+                (
+                "秒数，用于count_down类型的倒计时闹钟"
+                "当type为count_down时，此字段为必填"
+                "示例: 0 (表示0秒)"
+                )
                 ): vol.All(
                 vol.Coerce(int),
                 vol.Range(min=0, max=59)
@@ -101,23 +99,31 @@ class CreateAlarmClockIntent(intent.IntentHandler):
         }
     async def validate(self, slots: dict) -> bool:
         """验证槽位"""
-        alarm_type = slots["type"]["value"]
+        alarm_type_list = slots["type"]["value"]
+        alarm_type = alarm_type_list[0] if isinstance(alarm_type_list, list) else alarm_type_list
         if alarm_type == REPEAT_COUNTDOWN:
             if not all(key in slots for key in ["hour", "minute", "second"]):
+                _LOGGER.error(f"倒计时闹钟需要设置: hour, minute, second")
                 raise intent.IntentHandleError("倒计时闹钟需要设置 hour, minute, second")
         elif alarm_type in [REPEAT_EVERYDAY, REPEAT_WORKDAY]:
             if "trigger_time" not in slots:
+                _LOGGER.error(f"重复闹钟需要设置: trigger_time")
                 raise intent.IntentHandleError("重复闹钟需要设置 trigger_time")
-        else:
-            raise intent.IntentHandleError(f"不支持的闹钟类型: {alarm_type}")
+        elif alarm_type == REPEAT_OTHER:
+            _LOGGER.error(f"不支持该闹钟类型，当前只支持工作日闹钟，每天闹钟，倒计时闹钟")
+            raise intent.IntentHandleError(f"不支持该闹钟类型，当前只支持工作日闹钟，每天闹钟，倒计时闹钟")
         return True
     
     async def async_handle(self, intent_obj):
         """Handle the intent. """
         slots = self.async_validate_slots(intent_obj.slots)
-        await self.validate(slots)
+        _LOGGER.info("slots: %s", slots)
+        val = await self.validate(slots)
+        if not val:
+            raise intent.IntentHandleError("参数验证失败")
         alias = slots["alias"]["value"]
-        alarm_type = slots["type"]["value"]
+        alarm_type_list = slots["type"]["value"]
+        alarm_type = alarm_type_list[0] if isinstance(alarm_type_list, list) else alarm_type_list
         speak_id = slots["_speaker_id"]["value"]
         triggers = []
         week_day = []
@@ -275,8 +281,10 @@ async def create_alarm_clock_auto(hass, triggers: list[dict], alias, speak_id, r
     entries = get_entities(hass, speak_id)
     entry_id = ""
     for entry in entries:
-        if entry.name == "Alarm":
+        _LOGGER.info("speaker entry id: %s , entry name : %s", entry.entity_id, entry.name)
+        if entry.name == "Alarm" or entry.name == "huan_xing":
             entry_id = entry.entity_id
+    _LOGGER.info("speaker entry_id: %s",entry_id)    
     if len(entry_id) == 0:
         return False, "未找到对应的可操作设备"
     action = [{
