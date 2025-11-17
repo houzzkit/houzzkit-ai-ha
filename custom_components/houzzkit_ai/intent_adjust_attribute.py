@@ -14,9 +14,9 @@ from homeassistant.core import State, callback
 from homeassistant.helpers import config_validation as cv, intent
 from homeassistant.const import (
     ATTR_TEMPERATURE, SERVICE_TURN_ON, Platform, ATTR_ENTITY_ID,
+    SERVICE_SET_COVER_POSITION
 )
 from homeassistant.util.color import RGBColor
-from homeassistant.util.percentage import percentage_to_ordered_list_item
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -344,7 +344,7 @@ def adjust_fan_speed(ctx: AdjustmentContext, target: AdjustmentTarget):
 
 @register_adjustment("climate", "fan_speed")
 def adjust_climate_fan_speed(ctx: AdjustmentContext, target: AdjustmentTarget):
-    fan_modes: list[str] = ctx.state.attributes.get(climate.ATTR_FAN_MODES, [])
+    fan_modes: list[str] = ctx.state.attributes.get(climate.const.ATTR_FAN_MODES, [])
     if len(fan_modes) == 0:
         raise intent.IntentHandleError("unsupported")
     
@@ -355,8 +355,8 @@ def adjust_climate_fan_speed(ctx: AdjustmentContext, target: AdjustmentTarget):
     if ctx.delta.special and ctx.delta.special in ["auto", "low", "medium", "high"]:
         target_fan_mode = ctx.delta.special
         if target_fan_mode in fan_modes:
-            target.service = climate.SERVICE_SET_FAN_MODE
-            target.service_data[climate.ATTR_FAN_MODE] = target_fan_mode
+            target.service = climate.const.SERVICE_SET_FAN_MODE
+            target.service_data[climate.const.ATTR_FAN_MODE] = target_fan_mode
             target.attributes["fan_mode"] = target_fan_mode
             return
         raise intent.IntentHandleError("unsupported the mode")
@@ -376,7 +376,7 @@ def adjust_climate_fan_speed(ctx: AdjustmentContext, target: AdjustmentTarget):
     if ctx.delta.unit != "%":
         ctx.delta.unit = "level"
     if ctx.delta.adjust != AdjustType.SET:
-        current_mode = ctx.state.attributes.get(climate.ATTR_FAN_MODE)
+        current_mode = ctx.state.attributes.get(climate.const.ATTR_FAN_MODE)
         if current_mode is None or current_mode == "auto":
             raise UnsupportAdjustmentError
         
@@ -393,8 +393,8 @@ def adjust_climate_fan_speed(ctx: AdjustmentContext, target: AdjustmentTarget):
     _LOGGER.info(f"adjust_climate_fan_speed: current_percent={current_percent} target_percent={target_percent}")
     target_mode_index = min(target_percent//percentage_step-1, len(fan_modes) - 1)
     target_fan_mode = fan_modes[target_mode_index]
-    target.service = climate.SERVICE_SET_FAN_MODE
-    target.service_data[climate.ATTR_FAN_MODE] = target_fan_mode
+    target.service = climate.const.SERVICE_SET_FAN_MODE
+    target.service_data[climate.const.ATTR_FAN_MODE] = target_fan_mode
     target.attributes["updated_level"] = target_mode_index
     target.attributes["fan_mode"] = target_fan_mode
 
@@ -407,9 +407,9 @@ def adjust_climate_temperature(ctx: AdjustmentContext, target: AdjustmentTarget)
     if ctx.delta.unit in ["档", "level"]:
         ctx.delta.unit = "度"
         
-    min_temperature = ctx.state.attributes.get(climate.ATTR_MIN_TEMP, 10)
-    max_temperature = ctx.state.attributes.get(climate.ATTR_MAX_TEMP, 30)
-    temperature_step = ctx.state.attributes.get(climate.ATTR_TARGET_TEMP_STEP, 1)
+    min_temperature = ctx.state.attributes.get(climate.const.ATTR_MIN_TEMP, 10)
+    max_temperature = ctx.state.attributes.get(climate.const.ATTR_MAX_TEMP, 30)
+    temperature_step = ctx.state.attributes.get(climate.const.ATTR_TARGET_TEMP_STEP, 1)
     temperature_step = max(temperature_step, 1) # >=1
     target.attributes = {
         "adjustment_step": temperature_step,
@@ -425,15 +425,15 @@ def adjust_climate_temperature(ctx: AdjustmentContext, target: AdjustmentTarget)
             raise UnsupportAdjustmentError
         
     target_temperature = ctx.delta.calc_target(current_temperature, temperature_step, 1, min_temperature, max_temperature, supports={"number"})
-    target.service = climate.SERVICE_SET_TEMPERATURE
+    target.service = climate.const.SERVICE_SET_TEMPERATURE
     target.service_data[ATTR_TEMPERATURE] = target_temperature
     target.attributes["updated_value"] = target_temperature
 
 
 @register_adjustment("humidifier", "humidity")
 def adjust_humidifier_humidity(ctx: AdjustmentContext, target: AdjustmentTarget):
-    min_value = ctx.state.attributes.get(humidifier.ATTR_MIN_HUMIDITY, 0)
-    max_value = ctx.state.attributes.get(humidifier.ATTR_MAX_HUMIDITY, 100)
+    min_value = ctx.state.attributes.get(humidifier.const.ATTR_MIN_HUMIDITY, 0)
+    max_value = ctx.state.attributes.get(humidifier.const.ATTR_MAX_HUMIDITY, 100)
     adjustment_step = 10
     target.attributes = {
         "adjustment_step": f"{adjustment_step}%",
@@ -443,13 +443,13 @@ def adjust_humidifier_humidity(ctx: AdjustmentContext, target: AdjustmentTarget)
     
     current_value: float | None = None
     if ctx.delta.adjust != AdjustType.SET:
-        current_value: float | None = ctx.state.attributes.get(humidifier.ATTR_HUMIDITY)
+        current_value: float | None = ctx.state.attributes.get(humidifier.const.ATTR_HUMIDITY)
         if current_value is None or (current_value < min_value):
             raise UnsupportAdjustmentError
         
     target_value = ctx.delta.calc_target(current_value, adjustment_step, 1, min_value, max_value, supports={"number", "level"})
-    target.service = humidifier.SERVICE_SET_HUMIDITY
-    target.service_data[humidifier.ATTR_HUMIDITY] = target_value
+    target.service = humidifier.const.SERVICE_SET_HUMIDITY
+    target.service_data[humidifier.const.ATTR_HUMIDITY] = target_value
     target.attributes["updated_value"] = f"{target_value}%"
     
 
@@ -466,7 +466,7 @@ def adjust_cover_position(ctx: AdjustmentContext, target: AdjustmentTarget):
             raise UnsupportAdjustmentError
     
     target_percent = ctx.delta.calc_target(current_percent, percentage_step, 1, 0, 100, supports={"number"})
-    target.service = cover.SERVICE_SET_COVER_POSITION
+    target.service = SERVICE_SET_COVER_POSITION
     target.service_data[cover.ATTR_POSITION] = target_percent
     target.attributes["updated_value"] = f"{target_percent}%"
     
@@ -581,7 +581,6 @@ class AdjustDeviceAttributeIntent(intent.IntentHandler):
                 name=state.name,
                 id=state.entity_id,
             ))
-                    
 
         if len(success_results) > 0:
             response.response_type = intent.IntentResponseType.ACTION_DONE

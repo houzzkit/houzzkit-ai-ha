@@ -1,27 +1,31 @@
 from enum import Enum
 from typing import Any
-import voluptuous as vol
 import logging
 from operator import attrgetter
 from homeassistant.helpers import entity_registry as er, intent
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.llm import CALENDAR_DOMAIN, SCRIPT_DOMAIN
+from homeassistant.components import (calendar, script)
 from homeassistant.util.json import JsonObjectType
 from decimal import Decimal
 from homeassistant.util import dt as dt_util, yaml as yaml_util
-from homeassistant.components.homeassistant import async_should_expose
+from homeassistant.components.homeassistant.const import DATA_EXPOSED_ENTITIES
+
 
 from homeassistant.helpers import (
     area_registry as ar,
-    config_validation as cv,
     device_registry as dr,
     entity_registry as er,
 )
 
-from .houzzkit import get_config_entry, get_entities
+from .houzzkit import get_entities
 
 
 _LOGGER = logging.getLogger(__name__)
+
+def async_should_expose(hass: HomeAssistant, assistant: str, entity_id: str) -> bool:
+    """Return True if an entity should be exposed to an assistant."""
+    exposed_entities = hass.data[DATA_EXPOSED_ENTITIES]
+    return exposed_entities.async_should_expose(assistant, entity_id)
 
 def _get_exposed_entities(
     hass: HomeAssistant,
@@ -65,8 +69,8 @@ def _get_exposed_entities(
 
     entities = {}
     data: dict[str, dict[str, Any]] = {
-        SCRIPT_DOMAIN: {},
-        CALENDAR_DOMAIN: {},
+        script.const.DOMAIN: {},
+        calendar.const.DOMAIN: {},
     }
 
     for state in sorted(hass.states.async_all(), key=attrgetter("name")):
