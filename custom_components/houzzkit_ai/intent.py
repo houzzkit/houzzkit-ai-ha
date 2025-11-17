@@ -37,7 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_intents(hass: HomeAssistant):
-    """Set up the intents."""
+    """Set up the intents ."""
     intent.async_register(hass, ClimateSetHvacModeIntent())
     intent.async_register(hass, ClimateSetFanModeIntent())
     intent.async_register(hass, CreateAlarmClockIntent())
