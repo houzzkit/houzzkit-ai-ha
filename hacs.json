@@ -4,5 +4,6 @@
   "zip_release": true,
   "filename": "houzzkit_ai.zip",
   "hide_default_branch": false,
+  "country": ["CN"],
   "homeassistant": "2025.9.0"
 }
