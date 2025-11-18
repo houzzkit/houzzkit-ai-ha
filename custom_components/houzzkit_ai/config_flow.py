@@ -30,10 +30,10 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_LLM_HASS_API
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import AbortFlow
-from homeassistant.helpers import selector, llm
+from homeassistant.helpers import selector
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
@@ -943,15 +943,4 @@ class OptionsFlowHandler(OptionsFlow):
                 ): bool,
             }
         )
-        hass_apis = [
-            selector.SelectOptionDict(label=api.name, value=api.id)
-            for api in llm.async_get_apis(self.hass)
-        ]
-        if len(hass_apis) > 1:
-            data_schema = data_schema.extend({
-                vol.Optional(CONF_LLM_HASS_API, default=[]): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=hass_apis, multiple=True),
-                ),
-            })
-            data_schema = self.add_suggested_values_to_schema(data_schema, self.config_entry.options)
         return self.async_show_form(step_id="init", data_schema=data_schema)
