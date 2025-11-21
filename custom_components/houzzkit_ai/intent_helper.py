@@ -89,15 +89,25 @@ class HaTargetItem(TypedDict):
     area: str | None
     devices: list[HaDeviceItem]
 
+@dataclass
+class StateWithAreaConstraint:
+    states: list[State]
+    unset_area_constraint: bool
+
+
 async def match_intent_entities(intent_obj: intent.Intent, targets: list[HaTargetItem]) -> tuple[dict | None, list[EntityInfo] | None]:
     """Match entities by request parameters."""
     hass = intent_obj.hass
-    found_states: list[State] = []
+    found_states: list[StateWithAreaConstraint] = []
     for target in targets:
         for device in target["devices"]:
+            # area_name
+            # None: devices in all areas.
+            # "": devices in unset area.
+            area_name = target.get("area")
             match_constraints = intent.MatchTargetsConstraints(
                 name=device.get("name"),
-                area_name=target.get("area"),
+                area_name=area_name,
                 domains=device["domains"],
                 assistant=intent_obj.assistant,
                 single_target=False,
@@ -111,31 +121,33 @@ async def match_intent_entities(intent_obj: intent.Intent, targets: list[HaTarge
             if not match_result.is_match:
                 continue
             
-            found_states.extend(match_result.states)
+            unset_area_constraint = area_name == ""
+            found_states.append(StateWithAreaConstraint(states=match_result.states, unset_area_constraint=unset_area_constraint))
     
-    if len(found_states) == 0:
-        return {
-            "success": False,
-            "error": "No available devices found"
-        }, None
-    
+
     # Filter out candidate targets.
     candidate_entities: list[EntityInfo] = []
-    for state in found_states:
-        if state.state == "unavailable":
-            continue
+    for item in found_states:
         
-        entity_registry = er.async_get(hass)
-        entity_entry = entity_registry.async_get(state.entity_id)
-        if not entity_entry:
-            continue
-        
-        entity_name = get_entity_name(entity_entry, state)
-        entity_area = get_entity_area(hass, entity_entry)
-        on_off = "off" if state.state == "off" else "on"
-        entity_info = EntityInfo(name=entity_name, area=entity_area, state=state, entity=entity_entry, on_off=on_off)
-        _LOGGER.info(f"Match intent available target: {entity_info}")
-        candidate_entities.append(entity_info)
+        for state in item.states:
+            if state.state == "unavailable":
+                continue
+            
+            entity_registry = er.async_get(hass)
+            entity_entry = entity_registry.async_get(state.entity_id)
+            if not entity_entry:
+                continue
+            
+            entity_area = get_entity_area(hass, entity_entry)
+            if item.unset_area_constraint and entity_area:
+                # The devices must in unset area.
+                continue
+            
+            entity_name = get_entity_name(entity_entry, state)
+            on_off = "off" if state.state == "off" else "on"
+            entity_info = EntityInfo(name=entity_name, area=entity_area, state=state, entity=entity_entry, on_off=on_off)
+            _LOGGER.info(f"Match intent available target: {entity_info}")
+            candidate_entities.append(entity_info)
                 
     # No any available.
     if len(candidate_entities) == 0:
