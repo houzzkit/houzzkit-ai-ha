@@ -1,27 +1,28 @@
-from enum import Enum
-from typing import Any
-import voluptuous as vol
 import logging
-from operator import attrgetter
-from homeassistant.helpers import entity_registry as er, intent
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.llm import CALENDAR_DOMAIN, SCRIPT_DOMAIN
-from homeassistant.util.json import JsonObjectType
 from decimal import Decimal
-from homeassistant.util import dt as dt_util, yaml as yaml_util
-from homeassistant.components.homeassistant import async_should_expose
+from enum import Enum
+from operator import attrgetter
+from typing import Any
 
-from homeassistant.helpers import (
-    area_registry as ar,
-    config_validation as cv,
-    device_registry as dr,
-    entity_registry as er,
-)
+from homeassistant.components import calendar, script
+from homeassistant.components.homeassistant.const import DATA_EXPOSED_ENTITIES
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import intent
+from homeassistant.util import dt as dt_util
+from homeassistant.util import yaml as yaml_util
+from homeassistant.util.json import JsonObjectType
 
-from .houzzkit import get_config_entry, get_entities
-
+from .houzzkit import get_entities
 
 _LOGGER = logging.getLogger(__name__)
+
+def async_should_expose(hass: HomeAssistant, assistant: str, entity_id: str) -> bool:
+    """Return True if an entity should be exposed to an assistant."""
+    exposed_entities = hass.data[DATA_EXPOSED_ENTITIES]
+    return exposed_entities.async_should_expose(assistant, entity_id)
 
 def _get_exposed_entities(
     hass: HomeAssistant,
@@ -65,8 +66,8 @@ def _get_exposed_entities(
 
     entities = {}
     data: dict[str, dict[str, Any]] = {
-        SCRIPT_DOMAIN: {},
-        CALENDAR_DOMAIN: {},
+        script.const.DOMAIN: {},
+        calendar.const.DOMAIN: {},
     }
 
     for state in sorted(hass.states.async_all(), key=attrgetter("name")):
@@ -160,10 +161,13 @@ class HouzzkitGetLiveContextIntent(intent.IntentHandler):
         "1. Answering questions about current conditions (e.g., 'Is the light on?'). "
         "2. As the first step in conditional actions (e.g., 'If there is someone in the bedroom, turn on the bedroom light'), checking if there's anyone present is required."
     )
-    slot_schema = {
-    } # type: ignore
 
-    async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType:
+    @property
+    def slot_schema(self) -> dict | None:
+        """Return a slot schema."""
+        return None
+    
+    async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType: # type: ignore
         """Get the current state of exposed entities."""
         slots = self.async_validate_slots(intent_obj.slots)
         _LOGGER.info(f"HouzzkitGetLiveContext: slots={slots}")

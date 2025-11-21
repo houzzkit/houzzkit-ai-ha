@@ -123,7 +123,7 @@ class McpTransport:
                 device_id=None,
             )
             self._mcp_server = await self._create_server(context)
-            self._mcp_server.version = "2.0.1"
+            self._mcp_server.version = "2.1.0"
             options = await self.hass.async_add_executor_job(self._mcp_server.create_initialization_options)
 
             await self._create_streams()
@@ -141,9 +141,10 @@ class McpTransport:
         """Establish WebSocket connection and run server tasks."""
         _LOGGER.info("mcp Connecting to MCP client at: %s", self.endpoint)
         timeout = aiohttp.ClientTimeout(total=60)
-
+        assert self.endpoint
         async with aiohttp.ClientSession(timeout=timeout) as client_session:
             try:
+                assert self.endpoint
                 async with client_session.ws_connect(self.endpoint) as ws:
                     self._current_ws = ws
                     self.reconnect_times = 0
@@ -152,7 +153,10 @@ class McpTransport:
                             tg.start_soon(self._handle_websocket_messages)
                             tg.start_soon(self._handle_outgoing_messages)
                             tg.start_soon(self._heartbeat_task)
-                            await self._mcp_server.run(self._recv_reader, self._send_writer, options)
+                            try:
+                                await self._mcp_server.run(self._recv_reader, self._send_writer, options)
+                            except Exception as err:
+                                _LOGGER.error("mcp Error in server run: %s", err)
                         except Exception as err:
                             _LOGGER.error("mcp Error in server tasks: %s", err)
                             tg.cancel_scope.cancel()
