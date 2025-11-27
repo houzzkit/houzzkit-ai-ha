@@ -7,9 +7,12 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv*
 
 .idea
 .cache
 .DS_Store
+
+*.zip
+Makefile
 esphome-*/
