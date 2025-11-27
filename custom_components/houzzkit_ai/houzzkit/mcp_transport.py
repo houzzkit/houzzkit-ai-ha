@@ -26,34 +26,39 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up MCP Server from a config entry."""
-    entry_data = await async_remove_entry(hass, entry)
-    transport = McpTransport(hass, entry)
-    hass.async_create_task(transport.run_connection_loop())
-    entry_data["transport"] = transport
+    this_data = hass.data.setdefault(DOMAIN, {})
+    transport = this_data.get("transport")
+    if not transport:
+        transport = this_data.setdefault("transport", McpTransport(hass, entry))
+        hass.async_create_task(transport.run_connection_loop())
+    transport.entries.setdefault(entry.entry_id, entry)
 
+    new_endpoint = entry.data.get("mcp_endpoint")
     for ent in hass.config_entries.async_loaded_entries(DOMAIN):
-        endpoint = ent.data.get("mcp_endpoint")
-        transport = hass.data.setdefault(DOMAIN, {}).setdefault(ent.entry_id, {}).get("transport")
-        if not endpoint or not transport:
+        old_endpoint = ent.data.get("mcp_endpoint")
+        if not new_endpoint or not old_endpoint:
             continue
-        if endpoint == transport.endpoint:
+        if new_endpoint == old_endpoint:
             continue
         if ent.state not in [ConfigEntryState.LOADED, ConfigEntryState.FAILED_UNLOAD]:
             continue
-        _LOGGER.info("Entry mcp endpoint changed: %s", endpoint)
-        transport.set_endpoint(endpoint)
+        _LOGGER.info("Entry mcp endpoint changed: %s", new_endpoint)
+        transport.set_endpoint(new_endpoint)
         hass.config_entries.async_update_entry(ent, data={
             **ent.data,
-            "mcp_endpoint": endpoint,
+            "mcp_endpoint": new_endpoint,
         })
 
     return True
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry):
-    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
-    if transport := entry_data.pop("transport", None):
+    this_data = hass.data.setdefault(DOMAIN, {})
+    transport = this_data.get("transport")
+    if transport:
+        transport.entries.pop(entry.entry_id, None)
+    if not transport.entries:
+        this_data.pop("transport", None)
         await transport.stop()
-    return entry_data
 
 
 class McpTransport:
@@ -71,6 +76,7 @@ class McpTransport:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
         self.hass = hass
         self.entry = entry
+        self.entries = {}
         entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
         self.session_manager = entry_data.setdefault("session_manager", SessionManager())
         self.endpoint = entry.data.get("mcp_endpoint")
@@ -83,7 +89,7 @@ class McpTransport:
 
     async def _create_server(self, context: llm.LLMContext):
         """Create MCP server instance."""
-        llm_api_id = self.entry.data.get(CONF_LLM_HASS_API) or llm.LLM_API_ASSIST
+        llm_api_id = self.entry.options.get(CONF_LLM_HASS_API) or llm.LLM_API_ASSIST
         return await create_server(self.hass, llm_api_id, context)
 
     async def _create_streams(self):
