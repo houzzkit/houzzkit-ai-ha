@@ -372,6 +372,9 @@ class ESPHomeManager:
         """Subscribe to states and list entities on successful API login."""
         try:
             await self._on_connect()
+        except InvalidAuthAPIError as err:
+            _LOGGER.warning("Authentication failed for %s: %s", self.host, err)
+            await self._start_reauth_and_disconnect()
         except APIConnectionError as err:
             _LOGGER.warning(
                 "Error getting setting up connection for %s: %s", self.host, err
@@ -505,7 +508,7 @@ class ESPHomeManager:
 
         api_version = cli.api_version
         assert api_version is not None, "API version must be set"
-        entry_data.async_on_connect(device_info, api_version)
+        entry_data.async_on_connect(hass, device_info, api_version)
 
         await self._handle_dynamic_encryption_key(device_info)
 
@@ -641,7 +644,14 @@ class ESPHomeManager:
                     if self.reconnect_logic:
                         await self.reconnect_logic.stop()
                     return
+        await self._start_reauth_and_disconnect()
+
+    async def _start_reauth_and_disconnect(self) -> None:
+        """Start reauth flow and stop reconnection attempts."""
         self.entry.async_start_reauth(self.hass)
+        await self.cli.disconnect()
+        if self.reconnect_logic:
+            await self.reconnect_logic.stop()
 
     async def _handle_dynamic_encryption_key(
         self, device_info: EsphomeDeviceInfo
@@ -900,7 +910,7 @@ def _async_setup_device_registry(
         config_entry_id=entry.entry_id,
         configuration_url=configuration_url,
         connections={(dr.CONNECTION_NETWORK_MAC, device_info.mac_address)},
-        name=entry.title or entry_data.friendly_name or entry_data.name,
+        name=entry_data.friendly_name or entry_data.name,
         manufacturer=manufacturer,
         model=model,
         sw_version=sw_version,
@@ -1063,7 +1073,7 @@ def _async_register_service(
         service_name,
         {
             "description": (
-                f"Calls the service {service.name} of the node {device_info.name}"
+                f"Performs the action {service.name} of the node {device_info.name}"
             ),
             "fields": fields,
         },

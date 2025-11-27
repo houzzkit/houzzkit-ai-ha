@@ -62,7 +62,7 @@ from .houzzkit.http import async_setup_https
 
 ERROR_REQUIRES_ENCRYPTION_KEY = "requires_encryption_key"
 ERROR_INVALID_ENCRYPTION_KEY = "invalid_psk"
-ESPHOME_URL = "https://esphome.io/"
+ERROR_INVALID_PASSWORD_AUTH = "invalid_auth"
 _LOGGER = logging.getLogger(__name__)
 
 ZERO_NOISE_PSK = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
@@ -113,7 +113,6 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(fields),
             errors=errors,
-            description_placeholders={"esphome_url": ESPHOME_URL},
         )
 
     async def async_step_user(
@@ -221,7 +220,22 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
             self._password = ""
             return await self._async_authenticate_or_add()
 
+        if error == ERROR_INVALID_PASSWORD_AUTH or (
+            error is None and self._device_info and self._device_info.uses_password
+        ):
+            return await self.async_step_authenticate()
+
         if error is None and entry_data.get(CONF_NOISE_PSK):
+            # Device was configured with encryption but now connects without it.
+            # Check if it's the same device before offering to remove encryption.
+            if self._reauth_entry.unique_id and self._device_mac:
+                expected_mac = format_mac(self._reauth_entry.unique_id)
+                actual_mac = format_mac(self._device_mac)
+                if expected_mac != actual_mac:
+                    # Different device at the same IP - do not offer to remove encryption
+                    return self._async_abort_wrong_device(
+                        self._reauth_entry, expected_mac, actual_mac
+                    )
             return await self.async_step_reauth_encryption_removed_confirm()
         return await self.async_step_reauth_confirm()
 
@@ -593,6 +607,28 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
             **(self._extra.config_data or {}),
         }
 
+    @callback
+    def _async_abort_wrong_device(
+        self, entry: ConfigEntry, expected_mac: str, actual_mac: str
+    ) -> ConfigFlowResult:
+        """Abort flow because a different device was found at the IP address."""
+        assert self._host is not None
+        assert self._device_name is not None
+        if self.source == SOURCE_RECONFIGURE:
+            reason = "reconfigure_unique_id_changed"
+        else:
+            reason = "reauth_unique_id_changed"
+        return self.async_abort(
+            reason=reason,
+            description_placeholders={
+                "name": entry.data.get(CONF_DEVICE_NAME, entry.title),
+                "host": self._host,
+                "expected_mac": expected_mac,
+                "unexpected_mac": actual_mac,
+                "unexpected_device_name": self._device_name,
+            },
+        )
+
     async def _async_validated_connection(self) -> ConfigFlowResult:
         """Handle validated connection."""
         if self.source == SOURCE_RECONFIGURE:
@@ -624,17 +660,10 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
         # Reauth was triggered a while ago, and since than
         # a new device resides at the same IP address.
         assert self._device_name is not None
-        return self.async_abort(
-            reason="reauth_unique_id_changed",
-            description_placeholders={
-                "name": self._reauth_entry.data.get(
-                    CONF_DEVICE_NAME, self._reauth_entry.title
-                ),
-                "host": self._host,
-                "expected_mac": format_mac(self._reauth_entry.unique_id),
-                "unexpected_mac": format_mac(self.unique_id),
-                "unexpected_device_name": self._device_name,
-            },
+        return self._async_abort_wrong_device(
+            self._reauth_entry,
+            format_mac(self._reauth_entry.unique_id),
+            format_mac(self.unique_id),
         )
 
     async def _async_reconfig_validated_connection(self) -> ConfigFlowResult:
@@ -674,17 +703,10 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
         if self._reconfig_entry.data.get(CONF_DEVICE_NAME) == self._device_name:
             self._entry_with_name_conflict = self._reconfig_entry
             return await self.async_step_name_conflict()
-        return self.async_abort(
-            reason="reconfigure_unique_id_changed",
-            description_placeholders={
-                "name": self._reconfig_entry.data.get(
-                    CONF_DEVICE_NAME, self._reconfig_entry.title
-                ),
-                "host": self._host,
-                "expected_mac": format_mac(self._reconfig_entry.unique_id),
-                "unexpected_mac": format_mac(self.unique_id),
-                "unexpected_device_name": self._device_name,
-            },
+        return self._async_abort_wrong_device(
+            self._reconfig_entry,
+            format_mac(self._reconfig_entry.unique_id),
+            format_mac(self.unique_id),
         )
 
     async def async_step_encryption_key(
@@ -757,13 +779,15 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
         cli = APIClient(
             host,
             port or DEFAULT_PORT,
-            "",
+            self._password or "",
             zeroconf_instance=zeroconf_instance,
             noise_psk=noise_psk,
         )
         try:
             await cli.connect()
             self._device_info = await cli.device_info()
+        except InvalidAuthAPIError:
+            return ERROR_INVALID_PASSWORD_AUTH
         except RequiresEncryptionAPIError:
             return ERROR_REQUIRES_ENCRYPTION_KEY
         except InvalidEncryptionKeyAPIError as ex:
