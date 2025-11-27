@@ -20,11 +20,11 @@
             "service_received": "Action received"
         },
         "error": {
-            "connection_error": "Unable to connect to the ESPHome device. Make sure the device’s YAML configuration includes an `api` section.",
+            "connection_error": "Unable to connect to the device. Make sure the device’s YAML configuration includes an `api` section.",
             "invalid_auth": "Invalid authentication",
             "invalid_psk": "The encryption key is invalid. Make sure it matches the value in the device’s YAML configuration under `api -> encryption -> key`.",
-            "requires_encryption_key": "The ESPHome device requires an encryption key. Enter the key defined in the device’s YAML configuration under `api -> encryption -> key`.",
-            "resolve_error": "Unable to resolve the address of the ESPHome device. If this issue continues, consider setting a static IP address."
+            "requires_encryption_key": "The device requires an encryption key. Enter the key defined in the device’s YAML configuration under `api -> encryption -> key`.",
+            "resolve_error": "Unable to resolve the address of the device. If this issue continues, consider setting a static IP address."
         },
         "flow_title": "{name}",
         "step": {
@@ -65,7 +65,7 @@
                 "data_description": {
                     "noise_psk": "The encryption key is used to encrypt the connection between Home Assistant and the device. You can find this in the api: section of your device YAML configuration."
                 },
-                "description": "The device `{name}` enabled transport encryption or changed the encryption key. Please enter the updated key. You can find it in the ESPHome Dashboard or in your ESPHome device YAML configuration."
+                "description": "The device `{name}` enabled transport encryption or changed the encryption key. Please enter the updated key. You can find it in the Dashboard or in your device YAML configuration."
             },
             "reauth_encryption_removed_confirm": {
                 "description": "The device `{name}` disabled transport encryption. Please confirm that you want to remove the encryption key and allow unencrypted connections."
@@ -138,10 +138,10 @@
             "message": "Error communicating with the device {device_name}: {error}"
         },
         "error_compiling": {
-            "message": "Error compiling {configuration}. Try again in ESPHome dashboard for more information."
+            "message": "Error compiling {configuration}. Try again in dashboard for more information."
         },
         "error_uploading": {
-            "message": "Error during OTA (Over-The-Air) update of {configuration}. Try again in ESPHome dashboard for more information."
+            "message": "Error during OTA (Over-The-Air) update of {configuration}. Try again in dashboard for more information."
         },
         "ota_in_progress": {
             "message": "An OTA (Over-The-Air) update is already in progress for {configuration}."
