@@ -138,10 +138,10 @@
             "message": "与设备“{device_name}”通信时出错：{error}"
         },
         "error_compiling": {
-            "message": "编译 {configuration} 时出错。"
+            "message": "编译{configuration}时出错。"
         },
         "error_uploading": {
-            "message": "{configuration} 的 OTA（无线传输）过程中出现错误。"
+            "message": "OTA（无线）更新{configuration}时出错。"
         },
         "ota_in_progress": {
             "message": "{configuration} 的 OTA（无线）更新已在进行中。"
@@ -150,7 +150,7 @@
     "issues": {
         "api_password_deprecated": {
             "description": "API 密码已弃用，建议改用 API 加密密钥。\n\n删除 API 密码并将加密密钥添加到设备以解决此问题。",
-            "title": "API 密码在 {name} 上已弃用"
+            "title": "{name}上的 API 密码已弃用"
         },
         "assist_in_progress_deprecated": {
             "fix_flow": {
@@ -163,7 +163,7 @@
             "title": "{integration_name} 进行中二元传感器已弃用"
         },
         "ble_firmware_outdated": {
-            "description": "为了提高蓝牙的可靠性和性能，我们强烈建议将{name}更新为{version}或更高版本。从早于 2022.12.0 的 ESPHome 更新设备时，建议使用串行电缆而不是无线更新，以利用新的分区方案。",
+            "description": "ESPHome {version} 引入了超低延迟事件处理技术，将 BLE 事件延迟从 0-16 毫秒降低至约 12 微秒。这解决了与需要低延迟的设备进行配对、连接或握手时的稳定性问题，并使蓝牙代理操作的性能媲美甚至超越本地适配器。我们强烈建议您更新“{name}”以充分利用这些改进措施。",
             "title": "使用 ESPHome {version}或更高版本更新{name}"
         },
         "device_conflict": {
@@ -203,7 +203,7 @@
                     "subscribe_logs": "订阅来自设备的日志。"
                 },
                 "data_description": {
-                    "allow_service_calls": "启用后，设备可以执行 Home Assistant 动作，例如调用服务或发送事件。请仅在您信任该设备的情况下启用此功能。",
+                    "allow_service_calls": "启用后，设备可以执行 Home Assistant 动作或发送事件。请仅在您信任该设备的情况下启用此功能。",
                     "subscribe_logs": "启用后，设备将向 Home Assistant 发送日志，您可以在日志面板中查看它们。"
                 }
             }
