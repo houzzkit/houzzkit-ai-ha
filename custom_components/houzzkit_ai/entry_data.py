@@ -265,6 +265,14 @@ class RuntimeEntryData:
             ):
                 callback_(static_info)
 
+    async def load_platforms(
+        self,
+        hass: HomeAssistant,
+        entry: ESPHomeConfigEntry,
+        platforms: set[Platform],
+    ):
+        await self._ensure_platforms_loaded(hass, entry, platforms)
+
     async def _ensure_platforms_loaded(
         self,
         hass: HomeAssistant,

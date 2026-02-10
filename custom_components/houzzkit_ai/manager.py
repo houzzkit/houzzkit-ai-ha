@@ -1013,6 +1013,7 @@ def _async_setup_device_registry(
         if (
             device.connections & valid_connections
             or device.identifiers & valid_identifiers
+            or device.entry_type == dr.DeviceEntryType.SERVICE
         ):
             continue
         # Remove everything else
@@ -1265,6 +1266,9 @@ def _setup_services(
 async def cleanup_instance(entry: ESPHomeConfigEntry) -> RuntimeEntryData:
     """Cleanup the esphome client if it exists."""
     data = entry.runtime_data
+    if not isinstance(data, RuntimeEntryData):
+        return data
+
     data.async_on_disconnect()
     for cleanup_callback in data.cleanup_callbacks:
         cleanup_callback()
