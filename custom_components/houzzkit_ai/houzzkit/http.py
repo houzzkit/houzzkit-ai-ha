@@ -1,7 +1,6 @@
 import hashlib
 from aiohttp import web
 from homeassistant.core import HomeAssistant
-from homeassistant.const import CONF_HOST
 from homeassistant.helpers import device_registry as dr
 from homeassistant.components.http import HomeAssistantView, KEY_HASS
 from ..const import DOMAIN
@@ -14,6 +13,7 @@ async def async_setup_https(hass: HomeAssistant):
     hass.http.register_view(HouzzkitSetupView)
     hass.http.register_view(HouzzkitRemoveView)
     hass.http.register_view(HouzzkitSetNameView)
+    hass.http.register_view(HouzzkitTtsSttView)
 
 
 class HouzzkitHttpView(HomeAssistantView):
@@ -51,12 +51,10 @@ class HouzzkitSetupView(HouzzkitHttpView):
         hass = request.app[KEY_HASS]
         this_data = hass.data.setdefault(DOMAIN, {})
         if not (uuid := request.query.get("uuid")):
-            return self.json_message("uuid missing")
+            return self.json_message("uuid missing", 400)
         if uuid not in this_data:
-            return self.json_message("uuid invalid")
+            return self.json_message("uuid invalid", 400)
         setup_data = await request.json() or {}
-        if not setup_data.get(CONF_HOST):
-            return self.json_message("host missing")
         this_data[uuid] = setup_data
         return self.json_message("ok")
 
@@ -67,10 +65,10 @@ class HouzzkitRemoveView(HouzzkitHttpView):
     async def delete(self, request: web.Request):
         hass = request.app[KEY_HASS]
         if not (speak_id := request.query.get("speak_id")):
-            return self.json_message("speak_id missing")
+            return self.json_message("speak_id missing", 400)
         entry = await self.check_sign(request, speak_id)
         if not entry:
-            return self.json_message("params error")
+            return self.json_message("params error", 400)
         await hass.config_entries.async_remove(entry.entry_id)
         return self.json_message("ok")
 
@@ -82,20 +80,67 @@ class HouzzkitSetNameView(HouzzkitHttpView):
         hass = request.app[KEY_HASS]
         entry = await self.check_sign(request)
         if not entry:
-            return self.json_message("params error")
+            return self.json_message("params error", 400)
         data = await request.json() or {}
         if not (name := data.get("speak_name")):
-            return self.json_message("speak_name missing")
+            return self.json_message("speak_name missing", 400)
         mac = entry.data.get("mac")
         device_registry = dr.async_get(hass)
         device_entry = device_registry.async_get_device(
             connections={(dr.CONNECTION_NETWORK_MAC, mac)},
         )
         if not device_entry:
-            return self.json_message("device not found")
+            return self.json_message("device not found", 400)
         device_registry.async_update_device(device_entry.id, name=name)
         hass.config_entries.async_update_entry(entry, title=name)
         return self.json_message("ok")
+
+class HouzzkitTtsSttView(HouzzkitHttpView):
+    requires_auth = True
+    url = "/api/houzzkit-ai/tts-stt"
+    name = "api:houzzkit-ai:tts-stt"
+
+    async def get(self, request: web.Request):
+        hass = request.app[KEY_HASS]
+        message = request.query.get("message")
+        tts_entity = request.query.get("tts_entity", "tts.houzzkit_speech")
+        stt_entity = request.query.get("stt_entity", "stt.houzzkit_asr")
+
+        try:
+            stream = hass.data["tts_manager"].async_create_result_stream(
+                engine=tts_entity,
+                use_file_cache=not request.query.get("nocache"),
+                options=request.query.get("options") or {},
+            )
+        except Exception as err:
+            return self.json({"error": str(err)}, 400)
+        stream.async_set_message(message)
+
+        stt_entity = hass.data["stt"].get_entity(stt_entity)
+        if not stt_entity:
+            return self.json_message("stt entity not found", 400)
+
+        from homeassistant.components import stt
+        from .audio import async_convert_audio
+
+        metadata = stt.SpeechMetadata(
+            language="zh",
+            format=stt.AudioFormats.WAV,
+            codec=stt.AudioCodecs.PCM,
+            bit_rate=stt.AudioBitRates.BITRATE_16,
+            sample_rate=stt.AudioSampleRates.SAMPLERATE_16000,
+            channel=stt.AudioChannels.CHANNEL_MONO,
+        )
+        converting = async_convert_audio(
+            hass, stream.async_stream_result(), stream.extension,
+            to_extension=metadata.format.value,
+            to_sample_rate=metadata.sample_rate.value,
+        )
+        result = await stt_entity.async_process_audio_stream(metadata, converting)
+        return self.json({
+            "text": result.text,
+            "result": result.result,
+        })
 
 
 def calculate_sign(uri, params, mac, salt):

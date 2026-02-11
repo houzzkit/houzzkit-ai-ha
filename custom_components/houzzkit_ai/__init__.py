@@ -7,6 +7,7 @@ from aioesphomeapi import APIClient
 from homeassistant.components import zeroconf
 from homeassistant.components.bluetooth import async_remove_scanner
 from homeassistant.const import (
+    Platform,
     CONF_HOST,
     CONF_PASSWORD,
     CONF_PORT,
@@ -23,7 +24,7 @@ from .domain_data import DomainData
 from .entry_data import ESPHomeConfigEntry, RuntimeEntryData
 from .manager import DEVICE_CONFLICT_ISSUE_FORMAT, ESPHomeManager, cleanup_instance
 
-from .houzzkit import mcp_transport
+from .houzzkit import Dict, get_entry_data, mcp_transport
 from .houzzkit.http import async_setup_https
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -43,6 +44,22 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
     """Set up the esphome component."""
+    config_type = entry.data.get("config_type")
+    if config_type == "assist":
+        PLATFORMS = set()
+        entry.runtime_data = Dict(loaded_platforms=PLATFORMS)
+        if entry.data.get("llm_endpoint"):
+            PLATFORMS.add(Platform.CONVERSATION)
+        if entry.data.get("stt_endpoint"):
+            PLATFORMS.add(Platform.STT)
+        if entry.data.get("tts_endpoint"):
+            PLATFORMS.add(Platform.TTS)
+        if entry.data.get("mcp_endpoint"):
+            await mcp_transport.async_setup_entry(hass, entry)
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+        return True
+
     host: str = entry.data[CONF_HOST]
     port: int = entry.data[CONF_PORT]
     password: str | None = entry.data[CONF_PASSWORD]
@@ -75,14 +92,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> b
     )
     await manager.async_start()
 
-    if entry.data.get("mcp_endpoint"):
+    if not get_entry_data(hass, entry, "mcp_endpoint"):
         await mcp_transport.async_setup_entry(hass, entry)
 
     return True
 
 
+async def async_reload_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry):
+    """Handle update."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
     """Unload an esphome config entry."""
+    this_data = get_entry_data(hass, entry)
+    for k in ["llm_transport", "stt_transport", "tts_transport"]:
+        if transport := this_data.get(k):
+            await transport.async_remove_entry()
+
     unload_ok = await hass.config_entries.async_unload_platforms(
         entry, entry.runtime_data.loaded_platforms
     )
@@ -100,4 +127,5 @@ async def async_remove_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> 
     )
     await DomainData.get(hass).get_or_create_store(hass, entry).async_remove()
 
-    await mcp_transport.async_remove_entry(hass, entry)
+    if transport := get_entry_data(hass, entry, "mcp_transport"):
+        await transport.async_remove_entry()
