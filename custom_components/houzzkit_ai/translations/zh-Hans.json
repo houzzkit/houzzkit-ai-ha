@@ -134,6 +134,9 @@
         "action_call_failed": {
             "message": "无法在{device_name}上执行动作调用 {call_name}：{error}"
         },
+        "action_call_timeout": {
+            "message": "等待来自“{device_name}”上动作“{call_name}”调用的响应时超时"
+        },
         "error_communicating_with_device": {
             "message": "与设备“{device_name}”通信时出错：{error}"
         },
