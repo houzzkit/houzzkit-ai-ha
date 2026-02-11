@@ -7,6 +7,7 @@ from collections.abc import Mapping
 import json
 import logging
 from typing import Any, cast
+from urllib.parse import urlencode
 
 from aioesphomeapi import (
     APIClient,
@@ -28,10 +29,11 @@ from homeassistant.config_entries import (
     SOURCE_REAUTH,
     SOURCE_RECONFIGURE,
     ConfigEntry,
+    ConfigEntryBaseFlow,
     ConfigFlow,
     ConfigFlowResult,
     FlowType,
-    OptionsFlow,
+    OptionsFlowWithReload,
 )
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
 from homeassistant.core import callback
@@ -62,7 +64,7 @@ from .dashboard import async_get_or_create_dashboard_manager, async_set_dashboar
 from .encryption_key_storage import async_get_encryption_key_storage
 from .entry_data import ESPHomeConfigEntry
 from .manager import async_replace_device
-from .houzzkit import Dict
+from .houzzkit import Dict, get_haid
 from .houzzkit.http import async_setup_https
 
 ERROR_REQUIRES_ENCRYPTION_KEY = "requires_encryption_key"
@@ -74,7 +76,36 @@ ZERO_NOISE_PSK = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
 DEFAULT_NAME = "Houzzkit"
 
 
-class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
+class BaseFlow(ConfigEntryBaseFlow):
+    def init(self):
+        self._extra = Dict()
+        self._extra.setdefault("config_data", {})
+
+    @property
+    def this_data(self):
+        return self.hass.data.setdefault(DOMAIN, {})
+
+    @property
+    def setup_data(self):
+        return self.this_data.setdefault(self.setup_uuid, None)
+
+    @property
+    def setup_uuid(self):
+        return self._extra.setup_uuid
+
+    @setup_uuid.setter
+    def setup_uuid(self, uuid):
+        if uuid:
+            self._extra.setup_uuid = uuid
+            self.this_data[uuid] = None
+            _LOGGER.info("Waiting for setup data: %s", uuid)
+
+    def clean_setup(self):
+        self.this_data.pop(self.setup_uuid, None)
+        self._extra.pop("setup_uuid", None)
+
+
+class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
     """Handle a esphome config flow."""
 
     VERSION = 1
@@ -88,8 +119,6 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
         self._connected_address: str | None = None
         self.__name: str | None = None
         self._port: int | None = None
-        self._extra = Dict()
-        self._extra.setdefault("config_data", {})
         self._password: str | None = None
         self._noise_required: bool | None = None
         self._noise_psk: str | None = None
@@ -98,6 +127,7 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
         self._device_name: str | None = None
         self._device_mac: str | None = None
         self._entry_with_name_conflict: ConfigEntry | None = None
+        self.init()
 
     async def _async_step_user_base(
         self, user_input: dict[str, Any] | None = None, error: str | None = None
@@ -131,58 +161,83 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
         await async_setup_https(self.hass)
         errors = {}
         schema = {}
-        this_data = self.hass.data.setdefault(DOMAIN, {})
-        uuid = self._extra.setup_uuid
-        if not uuid:
-            self._extra.setup_uuid = uuid = ulid.ulid_hex()
-            this_data[uuid] = None
-            _LOGGER.info("Waiting for setup data: %s", uuid)
+        haid = await get_haid(self.hass)
+        if not self.setup_uuid:
+            self.setup_uuid = ulid.ulid_hex()
         else:
             if user_input is None:
                 user_input = {}
-            setup_data = this_data.setdefault(uuid, None)
-            if setup_data:
-                self._host = setup_data[CONF_HOST]
-                port = setup_data.get(CONF_PORT, 6053)
-                #把port 转成int类型
+            config_type = self.setup_data.get("config_type", "device") if self.setup_data else None
+
+            if config_type == "device":
+                self._host = self.setup_data[CONF_HOST]
+                port = self.setup_data.get(CONF_PORT, 6053)
                 try:
-                    self._port = int(port)  # 尝试转换为整数
+                    self._port = int(port)
                 except (TypeError, ValueError):
-                    # 转换失败时使用默认值 6053
                     self._port = 6053
                     _LOGGER.exception(f"Invalid port value '{port}', using default 6053")
-                self._noise_psk = setup_data.get(CONF_NOISE_PSK)
+                self._noise_psk = self.setup_data.get(CONF_NOISE_PSK)
                 error = await self.fetch_device_info()
-                self._name = setup_data.get("speak_name") or self._name
+                self._name = self.setup_data.get("speak_name") or self._name
                 if error:
                     errors["base"] = error
                 elif not user_input.get("submit_confirm"):
                     self._extra.tip = "\n".join([
                         "设备信息如下:",
                         f"**名称**: {self._name}",
-                        f"**IP**: {self._host}",
+                        f"**IP**: {self._host}"
                         f"**MAC**: {self._device_mac}",
                     ])
                     schema = {
                         vol.Required("submit_confirm", default=True): selector.BooleanSelector(),
                     }
                 else:
-                    this_data.pop(uuid, None)
-                    self._extra.pop("setup_uuid", None)
                     self._extra.config_data = {
-                        "uuid": uuid,
+                        "config_type": config_type,
+                        "uuid": self.setup_uuid,
                         "mac": self._device_mac,
-                        "speak_id": setup_data.get("speak_id"),
-                        "mcp_endpoint": setup_data.get("mcp_endpoint"),
+                        "speak_id": self.setup_data.get("speak_id"),
+                        "mcp_endpoint": self.setup_data.get("mcp_endpoint"),
                     }
+                    self.clean_setup()
                     return await self._async_authenticate_or_add()
-        haid = self.hass.data["core.uuid"]
+
+            if config_type == "assist":
+                config_data = {
+                    "config_type": config_type,
+                    "uuid": self.setup_uuid,
+                    "speak_id": self.setup_data.get("speak_id"),
+                    CONF_DEVICE_NAME: self.setup_data.get("speak_name", ""),
+                    "mcp_endpoint": self.setup_data.get("mcp_endpoint"),
+                    "llm_endpoint": self.setup_data.get("llm_endpoint"),
+                    "stt_endpoint": self.setup_data.get("stt_endpoint"),
+                    "tts_endpoint": self.setup_data.get("tts_endpoint"),
+                }
+                if entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
+                    self._reconfig_entry = entry
+                    _LOGGER.info("Found existing entry for %s", entry.title)
+                if getattr(self, "_reconfig_entry", None):
+                    _LOGGER.debug("Update existing entry: %s", config_data)
+                    return self.async_update_reload_and_abort(self._reconfig_entry, data=config_data)
+                await self.async_set_unique_id(haid)
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title="Houzzkit AI",
+                    data=config_data,
+                )
+
         internal = get_url(self.hass, prefer_external=False)
         if not self._extra.tip:
             haip = internal.split("//")[1].split(":")[0]
             self._extra.tip = "\n".join([
                 f"您的 HomeAssistant 局域网IP地址为: **{haip}**",
             ])
+        params = {
+            "haid": haid,
+            "uuid": self.setup_uuid,
+            "home_name": self.hass.config.location_name,
+        }
         return self.async_show_form(
             step_id="qrcode",
             errors=errors,
@@ -190,7 +245,7 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
                 schema or {
                     vol.Optional("qrcode"): selector.QrCodeSelector(
                         config=selector.QrCodeSelectorConfig(
-                            data=f"{internal}/api/houzzkit-ai/setup/qrcode?haid={haid}&uuid={uuid}",
+                            data=f"{internal}/api/houzzkit-ai/setup/qrcode?{urlencode(params)}",
                             scale=5,
                             error_correction_level=selector.QrErrorCorrectionLevel.QUARTILE,
                         ),
@@ -1000,7 +1055,7 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
         return OptionsFlowHandler()
 
 
-class OptionsFlowHandler(OptionsFlow):
+class OptionsFlowHandler(OptionsFlowWithReload):
     """Handle a option flow for esphome."""
 
     async def async_step_init(
@@ -1024,4 +1079,6 @@ class OptionsFlowHandler(OptionsFlow):
                 ): bool,
             }
         )
+        defaults = dict(self.config_entry.options)
+        data_schema = self.add_suggested_values_to_schema(data_schema, defaults)
         return self.async_show_form(step_id="init", data_schema=data_schema)

@@ -1,5 +1,6 @@
+import json
 from ..const import DOMAIN
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import entity_registry as er, instance_id
 
 class Dict(dict):
     def __getattr__(self, item):
@@ -9,6 +10,27 @@ class Dict(dict):
     def __setattr__(self, key, value):
         self[key] = Dict(value) if isinstance(value, dict) else value
 
+    def to_json(self, **kwargs):
+        return json.dumps(self, **kwargs)
+
+
+async def get_haid(hass):
+    return await instance_id.async_get(hass)
+
+def get_entry_data(hass, entry, field=None, set_default=None, pop=False):
+    data = hass.data.setdefault(DOMAIN, {})
+    config_type = entry.data.get("config_type")
+    if field == "mcp_transport":
+        pass
+    elif config_type == "assist":
+        data = entry.runtime_data
+    if field and pop:
+        return data.pop(field, None)
+    if field and set_default is not None:
+        return data.setdefault(field, set_default)
+    if field:
+        return data.get(field)
+    return data
 
 def get_config_entry(hass, speak_id=None, mac=None):
     for entry in hass.config_entries.async_entries(DOMAIN):

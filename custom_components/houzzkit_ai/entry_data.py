@@ -265,6 +265,14 @@ class RuntimeEntryData:
             ):
                 callback_(static_info)
 
+    async def load_platforms(
+        self,
+        hass: HomeAssistant,
+        entry: ESPHomeConfigEntry,
+        platforms: set[Platform],
+    ):
+        await self._ensure_platforms_loaded(hass, entry, platforms)
+
     async def _ensure_platforms_loaded(
         self,
         hass: HomeAssistant,
@@ -441,14 +449,6 @@ class RuntimeEntryData:
             # Ensure we save the data if we are unloading before the
             # save delay has passed.
             await self.store.async_save(self._pending_storage())
-
-    async def async_update_listener(
-        self, hass: HomeAssistant, entry: ESPHomeConfigEntry
-    ) -> None:
-        """Handle options update."""
-        if self.original_options == entry.options:
-            return
-        hass.async_create_task(hass.config_entries.async_reload(entry.entry_id))
 
     @callback
     def async_on_disconnect(self) -> None:
