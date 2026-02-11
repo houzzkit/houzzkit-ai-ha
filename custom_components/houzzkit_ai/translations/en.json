@@ -143,6 +143,9 @@
         "error_uploading": {
             "message": "Error during OTA (Over-The-Air) update of {configuration}. Try again in dashboard for more information."
         },
+        "houzzkit_auth_error": {
+            "message": "{name} Auth failed, please reconfigure."
+        },
         "ota_in_progress": {
             "message": "An OTA (Over-The-Air) update is already in progress for {configuration}."
         }

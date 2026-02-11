@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.components import conversation
 from homeassistant.components.mcp_server.server import create_server
 from homeassistant.components.mcp_server.session import Session, SessionManager
+from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from ..const import DOMAIN
 from . import get_entry_data
@@ -32,26 +33,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     if not transport:
         transport = get_entry_data(hass, entry, ATTR_TRANSPORT, McpTransport(hass, entry))
         hass.async_create_task(transport.run_connection_loop())
+    if new_endpoint := entry.data.get(ATTR_ENDPOINT):
+        await transport.set_endpoint(new_endpoint)
+        await transport.ensure_connected()
     transport.entries.setdefault(entry.entry_id, entry)
-
-    config_type = entry.data.get("config_type")
-    new_endpoint = entry.data.get(ATTR_ENDPOINT)
-    if new_endpoint and config_type in ("device", None):
-        for ent in hass.config_entries.async_loaded_entries(DOMAIN):
-            old_endpoint = ent.data.get(ATTR_ENDPOINT)
-            if not new_endpoint or not old_endpoint:
-                continue
-            if new_endpoint == old_endpoint:
-                continue
-            if ent.state not in [ConfigEntryState.LOADED, ConfigEntryState.FAILED_UNLOAD]:
-                continue
-            _LOGGER.info("Entry mcp endpoint changed: %s", new_endpoint)
-            await transport.set_endpoint(new_endpoint)
-            hass.config_entries.async_update_entry(ent, data={
-                **ent.data,
-                ATTR_ENDPOINT: new_endpoint,
-            })
-
     return True
 
 
@@ -136,6 +121,12 @@ class McpTransport(WsTransport):
                 if err.status == 401:
                     self.should_reconnect = False
                     self.logger.warning("WebSocket unauthorized, disable reconnect")
+                    self.entry.async_start_reauth(self.hass)
+                    raise ConfigEntryAuthFailed(
+                        translation_domain=DOMAIN,
+                        translation_key="houzzkit_auth_error",
+                        translation_placeholders={"name": self.entry.title},
+                    ) from err
             except Exception as err:
                 self.logger.exception("WebSocket connection failed: %s", err)
                 raise
