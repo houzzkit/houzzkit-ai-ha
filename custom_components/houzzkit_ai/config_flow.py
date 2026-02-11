@@ -168,6 +168,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
             if user_input is None:
                 user_input = {}
             config_type = self.setup_data.get("config_type", "device") if self.setup_data else None
+            mcp_endpoint = self.setup_data.get("mcp_endpoint") if self.setup_data else None
 
             if config_type == "device":
                 self._host = self.setup_data[CONF_HOST]
@@ -198,8 +199,9 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                         "uuid": self.setup_uuid,
                         "mac": self._device_mac,
                         "speak_id": self.setup_data.get("speak_id"),
-                        "mcp_endpoint": self.setup_data.get("mcp_endpoint"),
+                        "mcp_endpoint": mcp_endpoint,
                     }
+                    await self._sync_mcp_endpoint(mcp_endpoint)
                     self.clean_setup()
                     return await self._async_authenticate_or_add()
 
@@ -209,17 +211,24 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                     "uuid": self.setup_uuid,
                     "speak_id": self.setup_data.get("speak_id"),
                     CONF_DEVICE_NAME: self.setup_data.get("speak_name", ""),
-                    "mcp_endpoint": self.setup_data.get("mcp_endpoint"),
+                    "mcp_endpoint": mcp_endpoint,
                     "llm_endpoint": self.setup_data.get("llm_endpoint"),
                     "stt_endpoint": self.setup_data.get("stt_endpoint"),
                     "tts_endpoint": self.setup_data.get("tts_endpoint"),
                 }
-                if entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
-                    self._reconfig_entry = entry
+                reconfig_entry = None
+                if getattr(self, "_reauth_entry", None):
+                    reconfig_entry = self._reauth_entry
+                elif getattr(self, "_reconfig_entry", None):
+                    reconfig_entry = self._reconfig_entry
+                elif entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
+                    reconfig_entry = entry
                     _LOGGER.info("Found existing entry for %s", entry.title)
-                if getattr(self, "_reconfig_entry", None):
+                await self._sync_mcp_endpoint(mcp_endpoint, reconfig_entry)
+                if reconfig_entry:
                     _LOGGER.debug("Update existing entry: %s", config_data)
-                    return self.async_update_reload_and_abort(self._reconfig_entry, data=config_data)
+                    return self.async_update_reload_and_abort(reconfig_entry, data=config_data)
+
                 await self.async_set_unique_id(haid)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
@@ -257,48 +266,34 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
             },
         )
 
+    async def _sync_mcp_endpoint(self, new_endpoint, exclude_entry: ConfigEntry = None):
+        if not new_endpoint:
+            return
+        for ent in self.hass.config_entries.async_loaded_entries(DOMAIN):
+            old_endpoint = ent.data.get("mcp_endpoint")
+            if not old_endpoint:
+                continue
+            if new_endpoint == old_endpoint:
+                continue
+            if exclude_entry and exclude_entry.entry_id == ent.entry_id:
+                continue
+            _LOGGER.info("Entry mcp endpoint changed: %s", [new_endpoint, ent.title, ent.entry_id])
+            self.hass.config_entries.async_update_entry(ent, data={
+                **ent.data,
+                "mcp_endpoint": new_endpoint,
+            })
+
     async def async_step_reauth(
         self, entry_data: Mapping[str, Any]
     ) -> ConfigFlowResult:
         """Handle a flow initialized by a reauth event."""
         self._reauth_entry = self._get_reauth_entry()
-        self._host = entry_data[CONF_HOST]
-        self._port = entry_data[CONF_PORT]
-        self._password = entry_data[CONF_PASSWORD]
+        self._host = entry_data.get(CONF_HOST)
+        self._port = entry_data.get(CONF_PORT)
+        self._password = entry_data.get(CONF_PASSWORD)
         self._device_name = entry_data.get(CONF_DEVICE_NAME)
         self._name = self._reauth_entry.title
-
-        # Device without encryption allows fetching device info. We can then check
-        # if the device is no longer using a password. If we did try with a password,
-        # we know setting password to empty will allow us to authenticate.
-        error = await self.fetch_device_info()
-        if (
-            error is None
-            and self._password
-            and self._device_info
-            and not self._device_info.uses_password
-        ):
-            self._password = ""
-            return await self._async_authenticate_or_add()
-
-        if error == ERROR_INVALID_PASSWORD_AUTH or (
-            error is None and self._device_info and self._device_info.uses_password
-        ):
-            return await self.async_step_authenticate()
-
-        if error is None and entry_data.get(CONF_NOISE_PSK):
-            # Device was configured with encryption but now connects without it.
-            # Check if it's the same device before offering to remove encryption.
-            if self._reauth_entry.unique_id and self._device_mac:
-                expected_mac = format_mac(self._reauth_entry.unique_id)
-                actual_mac = format_mac(self._device_mac)
-                if expected_mac != actual_mac:
-                    # Different device at the same IP - do not offer to remove encryption
-                    return self._async_abort_wrong_device(
-                        self._reauth_entry, expected_mac, actual_mac
-                    )
-            return await self.async_step_reauth_encryption_removed_confirm()
-        return await self.async_step_reauth_confirm()
+        return await self.async_step_qrcode()
 
     async def async_step_reauth_encryption_removed_confirm(
         self, user_input: dict[str, Any] | None = None
@@ -347,7 +342,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         """Handle a flow initialized by a reconfig request."""
         self._reconfig_entry = self._get_reconfigure_entry()
         data = self._reconfig_entry.data
-        self._host = data[CONF_HOST]
+        self._host = data.get(CONF_HOST)
         self._port = data.get(CONF_PORT, DEFAULT_PORT)
         self._noise_psk = data.get(CONF_NOISE_PSK)
         self._device_name = data.get(CONF_DEVICE_NAME)

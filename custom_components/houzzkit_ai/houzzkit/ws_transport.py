@@ -8,6 +8,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from . import Dict
 
@@ -101,6 +102,8 @@ class WsTransport:
                 self.logger.debug("Websocket loop for %s", self.entry.title)
                 if not await self.connect_to_client():
                     break
+            except ConfigEntryAuthFailed:
+                raise
             except Exception as err:
                 self.logger.warning("Websocket disconnected or failed: %s", err)
             finally:
