@@ -143,6 +143,9 @@
         "error_uploading": {
             "message": "{configuration} 的 OTA（无线传输）过程中出现错误。"
         },
+        "houzzkit_auth_error": {
+            "message": "{name} 授权失败，请重新配置。"
+        },
         "ota_in_progress": {
             "message": "{configuration} 的 OTA（无线）更新已在进行中。"
         }
