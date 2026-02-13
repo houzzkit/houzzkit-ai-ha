@@ -61,13 +61,17 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                     f"Entity {state.entity_id} cannot be turned off"
                 )
 
-            await hass.services.async_call(
-                    state.domain,
-                    SERVICE_PRESS_BUTTON,
-                    {ATTR_ENTITY_ID: state.entity_id},
-                    context=intent_obj.context,
-                    blocking=True,
+            await self._run_then_background(
+                hass.async_create_task(
+                    hass.services.async_call(
+                        state.domain,
+                        SERVICE_PRESS_BUTTON,
+                        {ATTR_ENTITY_ID: state.entity_id},
+                        context=intent_obj.context,
+                        blocking=True,
+                    )
                 )
+            )
             return
 
         if state.domain == COVER_DOMAIN:
@@ -78,13 +82,17 @@ class TurnDeviceIntentBase(intent.IntentHandler):
             else:
                 service_name = SERVICE_CLOSE_COVER
 
-            await hass.services.async_call(
-                    COVER_DOMAIN,
-                    service_name,
-                    {ATTR_ENTITY_ID: state.entity_id},
-                    context=intent_obj.context,
-                    blocking=True,
+            await self._run_then_background(
+                hass.async_create_task(
+                    hass.services.async_call(
+                        COVER_DOMAIN,
+                        service_name,
+                        {ATTR_ENTITY_ID: state.entity_id},
+                        context=intent_obj.context,
+                        blocking=True,
+                    )
                 )
+            )
             return
 
         if state.domain == LOCK_DOMAIN:
@@ -95,13 +103,17 @@ class TurnDeviceIntentBase(intent.IntentHandler):
             else:
                 service_name = SERVICE_UNLOCK
 
-            await hass.services.async_call(
-                    LOCK_DOMAIN,
-                    service_name,
-                    {ATTR_ENTITY_ID: state.entity_id},
-                    context=intent_obj.context,
-                    blocking=True,
+            await self._run_then_background(
+                hass.async_create_task(
+                    hass.services.async_call(
+                        LOCK_DOMAIN,
+                        service_name,
+                        {ATTR_ENTITY_ID: state.entity_id},
+                        context=intent_obj.context,
+                        blocking=True,
+                    )
                 )
+            )
             return
 
         if state.domain == VALVE_DOMAIN:
@@ -112,13 +124,17 @@ class TurnDeviceIntentBase(intent.IntentHandler):
             else:
                 service_name = SERVICE_CLOSE_VALVE
 
-            await hass.services.async_call(
-                    VALVE_DOMAIN,
-                    service_name,
-                    {ATTR_ENTITY_ID: state.entity_id},
-                    context=intent_obj.context,
-                    blocking=True,
+            await self._run_then_background(
+                hass.async_create_task(
+                    hass.services.async_call(
+                        VALVE_DOMAIN,
+                        service_name,
+                        {ATTR_ENTITY_ID: state.entity_id},
+                        context=intent_obj.context,
+                        blocking=True,
+                    )
                 )
+            )
             return
 
         if not hass.services.has_service(state.domain, service):
@@ -129,13 +145,18 @@ class TurnDeviceIntentBase(intent.IntentHandler):
         # Fall back to homeassistant.turn_on/off
         service_data: dict[str, Any] = {ATTR_ENTITY_ID: state.entity_id}
         _LOGGER.info(f"Operate target fallback: service={service} name={service_data}")
-        await hass.services.async_call(
-                state.domain,
-                service,
-                service_data,
-                context=intent_obj.context,
-                blocking=True,
+        await self._run_then_background(
+            hass.async_create_task_internal(
+                hass.services.async_call(
+                    state.domain,
+                    service,
+                    service_data,
+                    context=intent_obj.context,
+                    blocking=True,
+                ),
+                f"intent_call_service_{state.domain}_{service}",
             )
+        )
             
     async def _run_then_background(self, task: asyncio.Task[Any]) -> None:
         """Run task with timeout to (hopefully) catch validation errors.
