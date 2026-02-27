@@ -43,6 +43,9 @@ class WsTransport:
         pass
 
     async def set_endpoint(self, endpoint):
+        if self.endpoint == endpoint:
+            self.logger.info("Endpoint unchanged, skip set endpoint %s", endpoint)
+            return
         await self.stop()
         self.endpoint = endpoint
         self.reconnect_times = 0
@@ -51,6 +54,10 @@ class WsTransport:
 
     def update_activity_time(self):
         self._last_activity_time = time.monotonic()
+
+    def ws_log(self, msg, *args, **kwargs):
+        lvl = logging.ERROR if self.reconnect_times >= 3 else logging.INFO
+        self.logger.log(lvl, msg, *args, **kwargs)
 
     @property
     def is_connected(self):
@@ -201,7 +208,9 @@ class WsTransport:
             self.logger.error("Error reading WebSocket messages: %s", err)
             raise
         finally:
-            self.logger.error("WebSocket connection stopped. Final close code: %s", self._current_ws.close_code)
+            self.ws_log("WebSocket connection stopped. Final close code: %s", self._current_ws.close_code)
+            if self._current_ws.close_code == 1000:
+                self.should_reconnect = False
             cancel_scope.cancel()
 
     async def send_message(self, message):
@@ -274,7 +283,7 @@ class WsTransport:
                 self.logger.debug("heartbeat ping for %s", self.entry.title)
                 await self._current_ws.ping()
         except Exception as err:
-            self.logger.error("heartbeat ping failed: %s", err)
+            self.ws_log("heartbeat ping failed: %s", err)
 
     async def stop(self):
         self.should_reconnect = False
