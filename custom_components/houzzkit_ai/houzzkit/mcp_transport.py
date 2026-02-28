@@ -30,6 +30,7 @@ ATTR_TRANSPORT = "mcp_transport"
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up MCP Server from a config entry."""
     transport = get_entry_data(hass, entry, ATTR_TRANSPORT)
+    _LOGGER.debug("Setup mcp endpoint entry: %s", [entry.title, transport])
     if not transport:
         transport = get_entry_data(hass, entry, ATTR_TRANSPORT, McpTransport(hass, entry))
     if new_endpoint := entry.data.get(ATTR_ENDPOINT):
