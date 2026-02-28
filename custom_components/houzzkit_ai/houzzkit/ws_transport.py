@@ -46,11 +46,8 @@ class WsTransport:
         if self.endpoint == endpoint:
             self.logger.info("Endpoint unchanged, skip set endpoint %s", endpoint)
             return
-        await self.stop()
         self.endpoint = endpoint
-        self.reconnect_times = 0
-        self.should_reconnect = True
-        # No longer auto-connect here; connection is on-demand
+        await self.stop()
 
     def update_activity_time(self):
         self._last_activity_time = time.monotonic()
@@ -290,9 +287,9 @@ class WsTransport:
         self._is_connected = False
         self.reconnect_times = 0
 
-        for stream in (self._recv_writer, self._recv_reader, self._send_writer, self._send_reader):
-            if stream:
-                await stream.aclose()
         if self._current_ws:
             self.logger.debug("Closing websocket")
             await self._current_ws.close()
+        for stream in (self._recv_writer, self._recv_reader, self._send_writer, self._send_reader):
+            if stream:
+                await stream.aclose()
