@@ -48,6 +48,7 @@ class WsTransport:
             return
         self.endpoint = endpoint
         await self.stop()
+        await self.ensure_connected()
 
     def update_activity_time(self):
         self._last_activity_time = time.monotonic()

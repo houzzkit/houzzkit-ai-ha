@@ -37,7 +37,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         if new_endpoint != transport.endpoint:
             _LOGGER.info("Entry mcp endpoint changed: %s", new_endpoint)
             await transport.set_endpoint(new_endpoint)
-        await transport.ensure_connected()
+        else:
+            await transport.ensure_connected()
     transport.entries.setdefault(entry.entry_id, entry)
     return True
 

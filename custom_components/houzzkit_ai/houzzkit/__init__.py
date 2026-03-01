@@ -1,6 +1,10 @@
 import json
+import logging
 from ..const import DOMAIN
 from homeassistant.helpers import entity_registry as er, instance_id
+
+LOGGER = logging.getLogger(__name__)
+
 
 class Dict(dict):
     def __getattr__(self, item):
