@@ -23,11 +23,21 @@ async def get_haid(hass):
 
 def get_entry_data(hass, entry, field=None, set_default=None, pop=False):
     data = hass.data.setdefault(DOMAIN, {})
-    config_type = entry.data.get("config_type")
-    if field == "mcp_transport":
-        pass
-    elif config_type == "assist":
-        data = entry.runtime_data
+    if field != "mcp_transport":
+        config_type = entry.data.get("config_type")
+        if config_type == "assist":
+            data = entry.runtime_data
+        
+    if field and pop:
+        return data.pop(field, None)
+    if field and set_default is not None:
+        return data.setdefault(field, set_default)
+    if field:
+        return data.get(field)
+    return data
+
+def get_houzzkit_ai_data(hass, field=None, set_default=None, pop=False):
+    data = hass.data.setdefault(DOMAIN, {})
     if field and pop:
         return data.pop(field, None)
     if field and set_default is not None:

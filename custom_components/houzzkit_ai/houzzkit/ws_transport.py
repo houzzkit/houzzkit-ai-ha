@@ -16,38 +16,38 @@ _LOGGER = logging.getLogger(__name__)
 
 class WsTransport:
     """Handles WebSocket transport."""
-    endpoint = None
-    reconnect_times = 0
-    should_reconnect = True
-    _transport_type = None
-    _current_ws = None
-    _recv_binary = False
-    _recv_writer: MemoryObjectSendStream = None
-    _recv_reader: MemoryObjectReceiveStream = None
-    _send_writer: MemoryObjectSendStream = None
-    _send_reader: MemoryObjectReceiveStream = None
-    _idle_timeout = 180
-    _last_activity_time = 0
-    _is_connected = False
-    _connection_lock = None
-
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, logger=None):
+        self.endpoint = None
+        self.reconnect_times = 0
+        self.should_reconnect = True
+        self._transport_type = None
+        self._current_ws = None
+        self._recv_binary = False
+        self._recv_writer: MemoryObjectSendStream = None
+        self._recv_reader: MemoryObjectReceiveStream = None
+        self._send_writer: MemoryObjectSendStream = None
+        self._send_reader: MemoryObjectReceiveStream = None
+        self._idle_timeout = 180
+        self._last_activity_time = 0
+        self._is_connected = False
+        
         self.hass = hass
         self.entry = entry
         self.logger = logger or _LOGGER
         self.entries = {}
         self._connection_lock = asyncio.Lock()
         self.init()
+        
 
     def init(self):
         pass
 
     async def set_endpoint(self, endpoint):
-        if self.endpoint == endpoint:
-            self.logger.info("Endpoint unchanged, skip set endpoint %s", endpoint)
-            return
+        # if self.endpoint == endpoint:
+        #     self.logger.info("Endpoint unchanged, skip set endpoint %s", endpoint)
+        #     return
         self.endpoint = endpoint
-        await self.stop()
+        # await self.stop()
         await self.ensure_connected()
 
     def update_activity_time(self):
@@ -68,6 +68,10 @@ class WsTransport:
             return True
 
         async with self._connection_lock:
+            if not self.should_reconnect:
+                self.logger.info("Interrupted before On-demand connect")
+                return False
+        
             if self.is_connected:
                 self.update_activity_time()
                 return True
@@ -77,17 +81,20 @@ class WsTransport:
                 return False
 
             self.logger.info("On-demand connecting to WebSocket: %s", self.endpoint)
-            self.should_reconnect = True
+            # self.should_reconnect = True
             self.reconnect_times = 0
             self.update_activity_time()
-            self.entry.async_create_background_task(
-                self.hass,
+            
+            self.hass.async_create_background_task(
                 self.run_connection_loop(),
                 f"transport_loop:{self._transport_type}"
             )
 
             # Wait for connection to be established
             for _ in range(150):
+                if not self.should_reconnect:
+                    self.logger.info("Interrupted wait connected")
+                    return False
                 if self.is_connected:
                     return True
                 await asyncio.sleep(0.1)
@@ -104,7 +111,6 @@ class WsTransport:
         """Run the connection loop with automatic reconnection."""
         while self.should_reconnect:
             try:
-                self.logger.debug("Websocket loop for %s", self.entry.title)
                 if not await self.connect_to_client():
                     break
             except ConfigEntryAuthFailed:
@@ -125,8 +131,12 @@ class WsTransport:
         if not self.endpoint:
             self.logger.error("No endpoint configured in config entry")
             return False
+        
+        if not self.should_reconnect:
+            # 提前终止
+            self.logger.info("Interrupted before connect")
+            return False
 
-        self.logger.debug("Websocket connect to client")
         try:
             await self._create_streams()
             await self._establish_websocket_connection()
@@ -143,8 +153,17 @@ class WsTransport:
         timeout = aiohttp.ClientTimeout(total=None, connect=60)
         async with aiohttp.ClientSession(timeout=timeout) as client_session:
             try:
+                if not self.should_reconnect:
+                    # 提前终止
+                    self.logger.info("Interrupted after session created")
+                    return
+
                 assert self.endpoint
                 async with client_session.ws_connect(self.endpoint) as ws:
+                    if not self.should_reconnect:
+                        # 提前终止
+                        self.logger.info("Interrupted after websocket connected")
+                        return
                     self._current_ws = ws
                     self._is_connected = True
                     self.update_activity_time()
@@ -159,6 +178,7 @@ class WsTransport:
                             self.logger.error("Error in server tasks: %s", err)
                             tg.cancel_scope.cancel()
                             raise
+                    self.logger.info("WebSocket connection tasks completed.")
             except aiohttp.WSServerHandshakeError as err:
                 self.logger.warning("WebSocket handshake failed: %s", err)
                 if err.status == 401:
@@ -168,6 +188,7 @@ class WsTransport:
                 self.logger.exception("WebSocket connection failed: %s", err)
                 raise
             finally:
+                self.logger.info("WebSocket connection stop over.")
                 self._is_connected = False
 
     async def _idle_monitor_task(self, cancel_scope: anyio.CancelScope):
@@ -207,7 +228,8 @@ class WsTransport:
             raise
         finally:
             self.ws_log("WebSocket connection stopped. Final close code: %s", self._current_ws.close_code)
-            if self._current_ws.close_code == 1000:
+            if self._current_ws.close_code == 1008:
+                # 被顶号后，禁止重连
                 self.should_reconnect = False
             cancel_scope.cancel()
 
@@ -278,19 +300,21 @@ class WsTransport:
         try:
             while self.should_reconnect and self._current_ws and not self._current_ws.closed:
                 await asyncio.sleep(55)
-                self.logger.debug("heartbeat ping for %s", self.entry.title)
+                self.logger.debug("heartbeat ping for %s", self.endpoint)
                 await self._current_ws.ping()
         except Exception as err:
             self.ws_log("heartbeat ping failed: %s", err)
 
     async def stop(self):
+        self.logger.info("Stop begin")
         self.should_reconnect = False
         self._is_connected = False
         self.reconnect_times = 0
 
         if self._current_ws:
-            self.logger.debug("Closing websocket")
+            self.logger.info("Closing websocket")
             await self._current_ws.close()
         for stream in (self._recv_writer, self._recv_reader, self._send_writer, self._send_reader):
             if stream:
                 await stream.aclose()
+        self.logger.info("Stop end")

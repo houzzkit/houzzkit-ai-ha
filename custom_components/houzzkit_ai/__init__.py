@@ -125,4 +125,4 @@ async def async_remove_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> 
     await DomainData.get(hass).get_or_create_store(hass, entry).async_remove()
 
     if transport := get_entry_data(hass, entry, "mcp_transport"):
-        await transport.async_remove_entry()
+        await transport.async_remove_entry(entry)
