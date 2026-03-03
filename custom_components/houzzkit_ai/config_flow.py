@@ -156,6 +156,12 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         errors = {}
         schema = {}
         haid = await get_haid(self.hass)
+        reconfig_entry = None
+        if getattr(self, "_reauth_entry", None):
+            reconfig_entry = self._reauth_entry
+        elif getattr(self, "_reconfig_entry", None):
+            reconfig_entry = self._reconfig_entry
+
         if not self.setup_uuid:
             self.setup_uuid = ulid.ulid_hex()
         else:
@@ -210,12 +216,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                     "stt_endpoint": self.setup_data.get("stt_endpoint"),
                     "tts_endpoint": self.setup_data.get("tts_endpoint"),
                 }
-                reconfig_entry = None
-                if getattr(self, "_reauth_entry", None):
-                    reconfig_entry = self._reauth_entry
-                elif getattr(self, "_reconfig_entry", None):
-                    reconfig_entry = self._reconfig_entry
-                elif entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
+                if entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
                     reconfig_entry = entry
                     _LOGGER.info("Found existing entry for %s", entry.title)
                 await self._sync_mcp_endpoint(mcp_endpoint, reconfig_entry)
@@ -241,6 +242,11 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
             "uuid": self.setup_uuid,
             "home_name": self.hass.config.location_name,
         }
+        if reconfig_entry and reconfig_entry.data.get("mac"):
+            params.update({
+                "mac": reconfig_entry.data.get("mac"),
+                "speak_id": reconfig_entry.data.get("speak_id"),
+            })
         return self.async_show_form(
             step_id="qrcode",
             errors=errors,
