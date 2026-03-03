@@ -16,17 +16,15 @@ _LOGGER = logging.getLogger(__name__)
 
 class WsTransport:
     """Handles WebSocket transport."""
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, logger=None):
-        self.endpoint = None
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, endpoint: str, attr_endpoint: str, logger=None):
+        self.stop_event = asyncio.Event()
+        self.endpoint = endpoint
+        self.attr_endpoint = attr_endpoint
         self.reconnect_times = 0
         self.should_reconnect = True
         self._transport_type = None
         self._current_ws = None
         self._recv_binary = False
-        self._recv_writer: MemoryObjectSendStream = None
-        self._recv_reader: MemoryObjectReceiveStream = None
-        self._send_writer: MemoryObjectSendStream = None
-        self._send_reader: MemoryObjectReceiveStream = None
         self._idle_timeout = 180
         self._last_activity_time = 0
         self._is_connected = False
@@ -34,21 +32,18 @@ class WsTransport:
         self.hass = hass
         self.entry = entry
         self.logger = logger or _LOGGER
-        self.entries = {}
         self._connection_lock = asyncio.Lock()
-        self.init()
+        
+        self._recv_writer, self._recv_reader = anyio.create_memory_object_stream(0)
+        self._send_writer, self._send_reader = anyio.create_memory_object_stream(0)
+        
+    @property
+    def available(self):
+        return not self.stop_event.is_set() and self.should_reconnect
         
 
     def init(self):
         pass
-
-    async def set_endpoint(self, endpoint):
-        # if self.endpoint == endpoint:
-        #     self.logger.info("Endpoint unchanged, skip set endpoint %s", endpoint)
-        #     return
-        self.endpoint = endpoint
-        # await self.stop()
-        await self.ensure_connected()
 
     def update_activity_time(self):
         self._last_activity_time = time.monotonic()
@@ -60,18 +55,26 @@ class WsTransport:
     @property
     def is_connected(self):
         return self._is_connected and self._current_ws and not self._current_ws.closed
+    
+    def clear_endpoint_from_data(self):
+        if self.entry.data.get(self.attr_endpoint, "") == self.endpoint:
+            self.logger.info("Clearing endpoint from config entry data: %s %s", self.attr_endpoint, self.endpoint)
+            self.hass.config_entries.async_update_entry(self.entry, data={
+                **self.entry.data,
+                self.attr_endpoint: "",
+            })
 
     async def ensure_connected(self):
         """Ensure WebSocket is connected. Connect if not already connected."""
+        if not self.should_reconnect:
+            self.logger.info("Interrupted before ensure connected")
+            return False
+        
         if self.is_connected:
             self.update_activity_time()
             return True
 
         async with self._connection_lock:
-            if not self.should_reconnect:
-                self.logger.info("Interrupted before On-demand connect")
-                return False
-        
             if self.is_connected:
                 self.update_activity_time()
                 return True
@@ -81,11 +84,11 @@ class WsTransport:
                 return False
 
             self.logger.info("On-demand connecting to WebSocket: %s", self.endpoint)
-            # self.should_reconnect = True
             self.reconnect_times = 0
             self.update_activity_time()
             
-            self.hass.async_create_background_task(
+            task = self.entry.async_create_background_task(
+                self.hass,
                 self.run_connection_loop(),
                 f"transport_loop:{self._transport_type}"
             )
@@ -101,11 +104,6 @@ class WsTransport:
 
             self.logger.error("Timed out waiting for WebSocket connection")
             return False
-
-    async def _create_streams(self):
-        """Create memory object streams for communication."""
-        self._recv_writer, self._recv_reader = anyio.create_memory_object_stream(0)
-        self._send_writer, self._send_reader = anyio.create_memory_object_stream(0)
 
     async def run_connection_loop(self) -> None:
         """Run the connection loop with automatic reconnection."""
@@ -138,7 +136,6 @@ class WsTransport:
             return False
 
         try:
-            await self._create_streams()
             await self._establish_websocket_connection()
         except Exception as err:
             self.logger.exception("Failed to connect to websocket at %s: %s", self.endpoint, err)
@@ -183,6 +180,7 @@ class WsTransport:
                 self.logger.warning("WebSocket handshake failed: %s", err)
                 if err.status == 401:
                     self.should_reconnect = False
+                    self.clear_endpoint_from_data()
                     self.logger.warning("WebSocket unauthorized, disable reconnect")
             except Exception as err:
                 self.logger.exception("WebSocket connection failed: %s", err)
@@ -210,6 +208,7 @@ class WsTransport:
 
     async def _handle_incoming_messages(self, cancel_scope: anyio.CancelScope):
         """Handle incoming WebSocket messages."""
+        assert self._current_ws, "WebSocket connection not established"
         try:
             async for msg in self._current_ws:
                 self.update_activity_time()
@@ -256,6 +255,7 @@ class WsTransport:
 
     async def _handle_outgoing_messages(self):
         """Handle outgoing messages to WebSocket."""
+        assert self._current_ws, "WebSocket connection not established"
         try:
             async for message in self._send_reader:
                 if isinstance(message, dict):
@@ -305,13 +305,17 @@ class WsTransport:
         except Exception as err:
             self.ws_log("heartbeat ping failed: %s", err)
 
-    async def stop(self):
-        self.logger.info("Stop begin")
+    async def stop(self, reason: str = ""):
+        if self.stop_event.is_set():
+            return
+        self.stop_event.set()
+        
+        self.logger.info("Stop begin, reason: '%s'", reason)
         self.should_reconnect = False
         self._is_connected = False
         self.reconnect_times = 0
 
-        if self._current_ws:
+        if self._current_ws and not self._current_ws.closed:
             self.logger.info("Closing websocket")
             await self._current_ws.close()
         for stream in (self._recv_writer, self._recv_reader, self._send_writer, self._send_reader):

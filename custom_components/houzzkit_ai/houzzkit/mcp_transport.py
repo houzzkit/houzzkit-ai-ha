@@ -5,16 +5,14 @@ from custom_components.houzzkit_ai.entry_data import ESPHomeConfigEntry
 from mcp import types
 
 from homeassistant.core import HomeAssistant
-from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.helpers import llm
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.components import conversation
 from homeassistant.components.mcp_server.server import create_server
 from homeassistant.components.mcp_server.session import Session, SessionManager
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from ..const import DOMAIN
-from . import get_entry_data
+from . import EntryAuthFailedError, get_entry_data
 from .ws_transport import WsTransport
 
 try:
@@ -27,36 +25,36 @@ _LOGGER = logging.getLogger(__name__)
 ATTR_ENDPOINT = "mcp_endpoint"
 ATTR_TRANSPORT = "mcp_transport"
 
+# 全局 MCP 连接 ID 计数器
 mcp_transport_id = 0
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
+async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry):
     """Set up MCP Server from a config entry."""
     # 添加设备 或 重新配置
     # - 添加设备：新建连接
     # - 重新配置：重建连接
+    endpoint: str | None = entry.data.get(ATTR_ENDPOINT)
+    if not endpoint:
+        # entry.async_start_reauth(hass)
+        raise EntryAuthFailedError(entry)
     
-    global mcp_transport_id
-    mcp_transport_id += 1
-    
-    transport = get_entry_data(hass, None, ATTR_TRANSPORT, pop=True)
+    this_data = get_entry_data(hass, entry)
+    transport: McpTransport | None = this_data.pop(ATTR_TRANSPORT, None)
     _LOGGER.info("Setup mcp endpoint entry: %s", [entry.title, transport])
-    all_entries = {}
     if transport:
         try:
-            _LOGGER.info("Stop existing transport: %s", transport.entries)
-            all_entries.update(transport.entries)
-            await transport.stop()
+            await transport.stop("Reconfigure")
         except Exception as err:
             _LOGGER.error("Error stopping existing transport: %s", err)
     
-    if new_endpoint := entry.data.get(ATTR_ENDPOINT):
-        _LOGGER.info("Set mcp endpoint and ensure connected: endpoint=%s id=%s", new_endpoint, mcp_transport_id)
-        logger = logging.getLogger(__name__ + "." + str(mcp_transport_id))
-        transport = get_entry_data(hass, None, ATTR_TRANSPORT, McpTransport(hass, entry, logger=logger))
-        await transport.set_endpoint(new_endpoint)
-        all_entries[entry.entry_id] = entry
-        transport.entries = all_entries
-        _LOGGER.info("New transport entries: %s", transport.entries)
+    global mcp_transport_id
+    mcp_transport_id += 1
+    _LOGGER.info("Set mcp endpoint and ensure connected: endpoint=%s id=%s", endpoint, mcp_transport_id)
+    logger = logging.getLogger(__name__ + "." + str(mcp_transport_id))
+    transport = McpTransport(hass, entry, endpoint, ATTR_ENDPOINT, logger)
+    this_data[ATTR_TRANSPORT] = transport
+    await transport.ensure_connected()
+    
     return True
 
 
@@ -65,15 +63,12 @@ class McpTransport(WsTransport):
     _transport_type = "mcp"
     _mcp_server = None
 
-    def init(self):
-        self.session_manager = SessionManager()
-
     async def _create_server(self, context: llm.LLMContext):
         """Create MCP server instance."""
         llm_api_id = llm.LLM_API_ASSIST
         mcp_api = await llm.async_get_api(self.hass, llm_api_id, context)
         tools = [tool.name for tool in mcp_api.tools]
-        self.logger.info("MCP server tools: %s, llm_api_id=%s, options=%s", tools, llm_api_id)
+        self.logger.info("MCP server tools: %s, llm_api_id=%s", tools, llm_api_id)
         return await create_server(self.hass, llm_api_id, context)
 
     async def connect_to_client(self) -> bool:
@@ -97,13 +92,12 @@ class McpTransport(WsTransport):
                 device_id=None,
             )
             self._mcp_server = await self._create_server(context)
-            self._mcp_server.version = "2.1.0"
+            self._mcp_server.version = "2.2.0"
             options = await self.hass.async_add_executor_job(self._mcp_server.create_initialization_options)
 
-            await self._create_streams()
-
-            async with self.session_manager.create(Session(self._recv_writer)) as session_id:
-                await self._establish_websocket_connection(options)
+            session_manager = SessionManager()
+            async with session_manager.create(Session(self._recv_writer)) as session_id:
+                await self._establish_websocket_connection_with_options(options)
 
         except Exception as err:
             self.logger.exception("Failed to connect to websocket at %s: %s", self.endpoint, err)
@@ -111,10 +105,11 @@ class McpTransport(WsTransport):
 
         return self.should_reconnect
 
-    async def _establish_websocket_connection(self, options: dict):
+    async def _establish_websocket_connection_with_options(self, options):
         """Establish WebSocket connection and run server tasks."""
         self.logger.info("Connecting to: %s", self.endpoint)
-        assert self.endpoint
+        assert self.endpoint, "No endpoint configured"
+        assert self._mcp_server, "MCP server not created"
         if not self.should_reconnect:
             # 提前终止
             self.logger.info("Interrupted before session created")
@@ -138,7 +133,6 @@ class McpTransport(WsTransport):
                             tg.start_soon(self._handle_incoming_messages, tg.cancel_scope)
                             tg.start_soon(self._handle_outgoing_messages)
                             tg.start_soon(self._heartbeat_task)
-                            # tg.start_soon(self._idle_monitor_task, tg.cancel_scope)
                             try:
                                 await self._mcp_server.run(self._recv_reader, self._send_writer, options)
                             except Exception as err:
@@ -152,7 +146,8 @@ class McpTransport(WsTransport):
                 if err.status == 401:
                     self.should_reconnect = False
                     self.logger.warning("WebSocket unauthorized, disable reconnect")
-                    self.entry.async_start_reauth(self.hass)
+                    self.clear_endpoint_from_data()
+                    # self.entry.async_start_reauth(self.hass)
                     raise ConfigEntryAuthFailed(
                         translation_domain=DOMAIN,
                         translation_key="houzzkit_auth_error",
@@ -196,12 +191,9 @@ class McpTransport(WsTransport):
             self.logger.error("Invalid incoming msg: %s", msg, exc_info=True)
 
     async def async_remove_entry(self, entry: ESPHomeConfigEntry):
-        transport = get_entry_data(self.hass, None, ATTR_TRANSPORT)
+        this_data: dict = get_entry_data(self.hass, entry)
+        transport: McpTransport | None = this_data.pop(ATTR_TRANSPORT, None)
         self.logger.info("Remove entry from MCP transport: title=%s id=%s", entry.title, entry.entry_id)
         if transport:
-            transport.entries.pop(entry.entry_id, None)
-            self.logger.info("Remove entry from transport, last entries: %s", transport.entries)
-        if not transport.entries:
-            self.logger.info("No more entries using transport, stopping transport")
-            get_entry_data(self.hass, None, ATTR_TRANSPORT, pop=True)
-            await transport.stop()
+            await transport.stop("Remove entry")
+            

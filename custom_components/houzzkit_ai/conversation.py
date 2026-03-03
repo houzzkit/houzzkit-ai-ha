@@ -1,6 +1,7 @@
 import json
 import logging
-from homeassistant.core import HomeAssistant, HomeAssistantError
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.components import conversation
 from homeassistant.components.conversation import (
     DOMAIN as ENTITY_DOMAIN,
@@ -21,16 +22,14 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
     """Set up conversation entities."""
-    transport = await llm_transport.async_setup_entry(hass, config_entry)
-    async_add_entities([HouzzkitConversationEntity(transport)])
+    async_add_entities([HouzzkitConversationEntity(hass, config_entry)])
 
 class HouzzkitConversationEntity(BaseEntity):
     domain = ENTITY_DOMAIN
 
-    def __init__(self, transport: llm_transport.LlmTransport):
-        self.hass = transport.hass
-        self.entry = transport.entry
-        self.transport = transport
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
+        self.hass = hass
+        self.entry = entry
         self.entity_id = f"{self.domain}.houzzkit_agent"
         self._attr_name = "Houzzkit AI 对话代理"
         self._attr_unique_id = f"{self.entry.entry_id}-{ENTITY_DOMAIN}"
@@ -41,6 +40,10 @@ class HouzzkitConversationEntity(BaseEntity):
             entry_type=dr.DeviceEntryType.SERVICE,
         )
 
+    @property
+    def transport(self) -> llm_transport.LlmTransport:
+        return llm_transport.get_entry_transport(self.hass, self.entry)
+    
     @property
     def supported_languages(self):
         """Return a list of supported languages."""
@@ -78,6 +81,6 @@ class HouzzkitConversationEntity(BaseEntity):
         }))
         async for content in chat_log.async_add_delta_content_stream(
             self.entity_id,
-            self.transport.await_message()
+            self.transport.await_message() # type: ignore
         ):
             _LOGGER.info("LLM response: %s", content)

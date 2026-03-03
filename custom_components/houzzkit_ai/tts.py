@@ -1,6 +1,6 @@
 import logging
 from homeassistant.core import HomeAssistant
-from homeassistant.components.tts import (
+from homeassistant.components.tts.const import (
     DOMAIN as ENTITY_DOMAIN,
     TextToSpeechEntity as BaseEntity,
     TtsAudioType,
@@ -18,8 +18,7 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
     """Set up entities."""
-    transport = await tts_transport.async_setup_entry(hass, config_entry)
-    async_add_entities([HouzzkitTtsEntity(transport)])
+    async_add_entities([HouzzkitTtsEntity(hass, config_entry)])
 
 class HouzzkitTtsEntity(BaseEntity):
     domain = ENTITY_DOMAIN
@@ -28,10 +27,9 @@ class HouzzkitTtsEntity(BaseEntity):
     opus_frame_duration = 60
     opus_frame_samples = int(opus_sample_rate * opus_frame_duration / 1000)
 
-    def __init__(self, transport: tts_transport.TtsTransport):
-        self.hass = transport.hass
-        self.entry = transport.entry
-        self.transport = transport
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
+        self.hass = hass
+        self.entry = entry
         self.entity_id = f"{self.domain}.houzzkit_speech"
         self._attr_name = "Houzzkit AI 语音合成"
         self._attr_unique_id = f"{self.entry.entry_id}-{ENTITY_DOMAIN}"
@@ -45,9 +43,14 @@ class HouzzkitTtsEntity(BaseEntity):
         self._attr_supported_languages = ["en", "zh", "zh-Hans"]
         self._attr_supported_options = []
         self._attr_extra_state_attributes = {}
-
+    
+    @property
+    def transport(self) -> tts_transport.TtsTransport:
+        return tts_transport.get_entry_transport(self.hass, self.entry)
+    
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
+    
 
     async def async_get_tts_audio(
         self, message: str, language: str, options: dict

@@ -26,8 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
     """Set up entities."""
-    transport = await stt_transport.async_setup_entry(hass, config_entry)
-    async_add_entities([HouzzkitSttEntity(transport)])
+    async_add_entities([HouzzkitSttEntity(hass, config_entry)])
 
 class HouzzkitSttEntity(BaseEntity):
     domain = ENTITY_DOMAIN
@@ -36,10 +35,9 @@ class HouzzkitSttEntity(BaseEntity):
     opus_frame_duration = 60
     opus_frame_samples = int(opus_sample_rate * opus_frame_duration / 1000)
 
-    def __init__(self, transport: stt_transport.SttTransport):
-        self.hass = transport.hass
-        self.entry = transport.entry
-        self.transport = transport
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
+        self.hass = hass
+        self.entry = entry
         self.entity_id = f"{self.domain}.houzzkit_asr"
         self._attr_name = "Houzzkit AI 语音识别"
         self._attr_unique_id = f"{self.entry.entry_id}-{ENTITY_DOMAIN}"
@@ -57,6 +55,10 @@ class HouzzkitSttEntity(BaseEntity):
         self._attr_supported_sample_rates = [x for x in AudioSampleRates]
         self.opus_encoder = opuslib.Encoder(self.opus_sample_rate, self.opus_channels, opuslib.APPLICATION_VOIP)
 
+    @property
+    def transport(self) -> stt_transport.SttTransport:
+        return stt_transport.get_entry_transport(self.hass, self.entry)
+    
     @property
     def supported_languages(self):
         return self._attr_supported_languages
@@ -112,4 +114,4 @@ class HouzzkitSttEntity(BaseEntity):
             _LOGGER.info("Received response: %s", resp)
             if resp.type in ["stt", "tts"]:
                 text = resp.text
-        return SpeechResult(text, SpeechResultState.SUCCESS)
+        return SpeechResult(text, SpeechResultState.SUCCESS) # type: ignore

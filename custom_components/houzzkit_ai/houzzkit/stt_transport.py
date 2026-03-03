@@ -4,7 +4,7 @@ import anyio
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 
-from . import Dict, get_entry_data
+from . import Dict, EntryAuthFailedError, get_entry_data
 from .ws_transport import WsTransport
 
 _LOGGER = logging.getLogger(__name__)
@@ -12,13 +12,20 @@ ATTR_ENDPOINT = "stt_endpoint"
 ATTR_TRANSPORT = "stt_transport"
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
+def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "SttTransport":
     """Set up from a config entry."""
-    this_data = get_entry_data(hass, entry)
-    transport = this_data.get(ATTR_TRANSPORT)
-    if not transport:
-        transport = this_data.setdefault(ATTR_TRANSPORT, SttTransport(hass, entry))
-    transport.entries.setdefault(entry.entry_id, entry)
+    endpoint: str | None = entry.data.get(ATTR_ENDPOINT)
+    if not endpoint:
+        raise EntryAuthFailedError(entry)
+    
+    this_data: dict = get_entry_data(hass, entry)
+    transport: SttTransport | None = this_data.get(ATTR_TRANSPORT)
+    if transport and transport.endpoint == endpoint and transport.available:
+        return transport
+    
+    _LOGGER.info("Creating new SttTransport for entry: %s %s", entry.entry_id, entry.title)
+    transport = SttTransport(hass, entry, endpoint, ATTR_ENDPOINT, _LOGGER)
+    this_data[ATTR_TRANSPORT] = transport
     return transport
 
 
