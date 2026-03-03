@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Callable, Literal, get_args
 
 import voluptuous as vol
-from homeassistant.components import climate, cover, fan, humidifier, light
+from homeassistant.components import climate, cover, fan, humidifier, light, number
 from homeassistant.const import (ATTR_ENTITY_ID, ATTR_TEMPERATURE,
                                  SERVICE_SET_COVER_POSITION, SERVICE_TURN_ON,
                                  Platform)
@@ -488,7 +488,13 @@ def adjust_cover_position(ctx: AdjustmentContext, target: AdjustmentTarget):
     target.service = SERVICE_SET_COVER_POSITION
     target.service_data[cover.ATTR_POSITION] = target_percent
     target.attributes["updated_value"] = f"{target_percent}%"
-    
+
+@register_adjustment("number", "value")
+def adjust_number_value(ctx: AdjustmentContext, target: AdjustmentTarget):
+    target.attributes = {}
+    target.service = number.const.SERVICE_SET_VALUE
+    target.service_data["value"] = ctx.delta.value
+    target.attributes["updated_value"] = ctx.delta.value
     
 @register_adjustment("media_player", "volume")
 def adjust_media_player_volume(ctx: AdjustmentContext, target: AdjustmentTarget):
