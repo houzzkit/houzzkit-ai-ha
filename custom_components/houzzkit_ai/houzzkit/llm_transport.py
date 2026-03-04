@@ -51,10 +51,9 @@ class LlmTransport(WsTransport):
             yield Dict(error="Response timeout")
 
     async def async_remove_entry(self):
-        this_data = get_entry_data(self.hass, self.entry)
-        transport = this_data.get(ATTR_TRANSPORT)
+        entry = self.entry
+        this_data: dict = get_entry_data(self.hass, entry)
+        transport: LlmTransport | None = this_data.pop(ATTR_TRANSPORT, None)
+        self.logger.info("Remove entry from LLM transport: title=%s id=%s", entry.title, entry.entry_id)
         if transport:
-            transport.entries.pop(self.entry.entry_id, None)
-        if not transport.entries:
-            this_data.pop(ATTR_TRANSPORT, None)
-            await transport.stop()
+            await transport.stop("Remove entry")

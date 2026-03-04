@@ -46,9 +46,9 @@ class SttTransport(WsTransport):
             yield Dict(error="Response timeout")
 
     async def async_remove_entry(self):
-        transport = get_entry_data(self.hass, self.entry, ATTR_TRANSPORT)
+        entry = self.entry
+        this_data: dict = get_entry_data(self.hass, entry)
+        transport: SttTransport | None = this_data.pop(ATTR_TRANSPORT, None)
+        self.logger.info("Remove entry from STT transport: title=%s id=%s", entry.title, entry.entry_id)
         if transport:
-            transport.entries.pop(self.entry.entry_id, None)
-        if not transport.entries:
-            get_entry_data(self.hass, self.entry, ATTR_TRANSPORT, pop=True)
-            await transport.stop()
+            await transport.stop("Remove entry")

@@ -48,7 +48,9 @@ class TtsTransport(WsTransport):
             yield Dict(error="Response timeout")
 
     async def async_remove_entry(self):
-        this_data = get_entry_data(self.hass, self.entry)
-        transport = this_data.pop(ATTR_TRANSPORT, None)
+        entry = self.entry
+        this_data: dict = get_entry_data(self.hass, entry)
+        transport: TtsTransport | None = this_data.pop(ATTR_TRANSPORT, None)
+        self.logger.info("Remove entry from TTS transport: title=%s id=%s", entry.title, entry.entry_id)
         if transport:
-            await transport.stop("Entry removed")
+            await transport.stop("Remove entry")

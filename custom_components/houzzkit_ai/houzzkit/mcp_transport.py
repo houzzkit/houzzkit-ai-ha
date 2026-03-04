@@ -185,7 +185,8 @@ class McpTransport(WsTransport):
         except Exception as err:
             self.logger.error(f"Invalid incoming msg: {msg}, error: {err}")
 
-    async def async_remove_entry(self, entry: ESPHomeConfigEntry):
+    async def async_remove_entry(self):
+        entry = self.entry
         this_data: dict = get_entry_data(self.hass, entry)
         transport: McpTransport | None = this_data.pop(ATTR_TRANSPORT, None)
         self.logger.info("Remove entry from MCP transport: title=%s id=%s", entry.title, entry.entry_id)
