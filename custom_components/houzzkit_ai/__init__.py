@@ -43,7 +43,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
     """Set up the esphome component."""
-    LOGGER.debug("Setup entry: %s", [entry.title, entry.entry_id])
+    LOGGER.info("Setup entry: %s", [entry.title, entry.entry_id])
     config_type = entry.data.get("config_type")
     if config_type == "assist":
         PLATFORMS = set()
@@ -54,8 +54,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> b
             PLATFORMS.add(Platform.STT)
         if entry.data.get("tts_endpoint"):
             PLATFORMS.add(Platform.TTS)
-        if entry.data.get("mcp_endpoint"):
-            await mcp_transport.async_setup_entry(hass, entry)
+        await mcp_transport.async_setup_entry(hass, entry)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         return True
 
@@ -91,9 +90,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> b
     )
     await manager.async_start()
 
-    if not get_entry_data(hass, entry, "mcp_endpoint"):
-        await mcp_transport.async_setup_entry(hass, entry)
-
+    await mcp_transport.async_setup_entry(hass, entry)
     return True
 
 

@@ -1,7 +1,7 @@
 import logging
 from homeassistant.core import HomeAssistant
-from homeassistant.components.tts.const import (
-    DOMAIN as ENTITY_DOMAIN,
+from homeassistant.components.tts.const import DOMAIN as ENTITY_DOMAIN
+from homeassistant.components.tts import (
     TextToSpeechEntity as BaseEntity,
     TtsAudioType,
 )

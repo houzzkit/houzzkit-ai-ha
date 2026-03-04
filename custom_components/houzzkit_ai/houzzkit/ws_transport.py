@@ -34,8 +34,10 @@ class WsTransport:
         self.logger = logger or _LOGGER
         self._connection_lock = asyncio.Lock()
         
-        self._recv_writer, self._recv_reader = anyio.create_memory_object_stream(0)
-        self._send_writer, self._send_reader = anyio.create_memory_object_stream(0)
+        self._recv_writer: MemoryObjectSendStream = None # type: ignore
+        self._recv_reader: MemoryObjectReceiveStream = None # type: ignore
+        self._send_writer: MemoryObjectSendStream = None # type: ignore
+        self._send_reader: MemoryObjectReceiveStream = None # type: ignore
         
     @property
     def available(self):
@@ -84,7 +86,6 @@ class WsTransport:
                 return False
 
             self.logger.info("On-demand connecting to WebSocket: %s", self.endpoint)
-            self.reconnect_times = 0
             self.update_activity_time()
             
             task = self.entry.async_create_background_task(
@@ -104,6 +105,11 @@ class WsTransport:
 
             self.logger.error("Timed out waiting for WebSocket connection")
             return False
+        
+    async def _create_streams(self):
+        """Create memory object streams for communication."""
+        self._recv_writer, self._recv_reader = anyio.create_memory_object_stream(0)
+        self._send_writer, self._send_reader = anyio.create_memory_object_stream(0)
 
     async def run_connection_loop(self) -> None:
         """Run the connection loop with automatic reconnection."""
@@ -118,8 +124,8 @@ class WsTransport:
             finally:
                 self._is_connected = False
             if self.should_reconnect:
-                seconds = max(min(60, self.reconnect_times * 5), 1)
-                self.logger.info("Websocket retry after %s seconds", seconds)
+                seconds = max(min(60, self.reconnect_times * 5), 3)
+                self.logger.info("Websocket retry after %s seconds, times: %s", seconds, self.reconnect_times)
                 self.reconnect_times += 1
                 if seconds > 0:
                     await asyncio.sleep(seconds)
@@ -136,6 +142,7 @@ class WsTransport:
             return False
 
         try:
+            await self._create_streams()
             await self._establish_websocket_connection()
         except Exception as err:
             self.logger.exception("Failed to connect to websocket at %s: %s", self.endpoint, err)
@@ -270,7 +277,8 @@ class WsTransport:
         finally:
             self.logger.info("Websocket writer stopped")
             try:
-                await self._current_ws.close()
+                if self._current_ws and not self._current_ws.closed:
+                    await self._current_ws.close()
             except Exception as err:
                 self.logger.error("Error closing WebSocket: %s", err)
 

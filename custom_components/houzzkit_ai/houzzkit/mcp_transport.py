@@ -35,7 +35,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry):
     # - 重新配置：重建连接
     endpoint: str | None = entry.data.get(ATTR_ENDPOINT)
     if not endpoint:
-        # entry.async_start_reauth(hass)
         raise EntryAuthFailedError(entry)
     
     this_data = get_entry_data(hass, entry)
@@ -114,6 +113,7 @@ class McpTransport(WsTransport):
             # 提前终止
             self.logger.info("Interrupted before session created")
             return
+        await self._create_streams()
         timeout = aiohttp.ClientTimeout(total=None, connect=60)
         async with aiohttp.ClientSession(timeout=timeout) as client_session:
             try:
@@ -188,7 +188,7 @@ class McpTransport(WsTransport):
                 message = SessionMessage(message)
             await self._recv_writer.send(message)
         except Exception as err:
-            self.logger.error("Invalid incoming msg: %s", msg, exc_info=True)
+            self.logger.error(f"Invalid incoming msg: {msg}, error: {err}")
 
     async def async_remove_entry(self, entry: ESPHomeConfigEntry):
         this_data: dict = get_entry_data(self.hass, entry)
