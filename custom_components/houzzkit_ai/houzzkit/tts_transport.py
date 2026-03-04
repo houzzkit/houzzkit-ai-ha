@@ -39,7 +39,6 @@ class TtsTransport(WsTransport):
             with anyio.fail_after(timeout):
                 async for data in self._recv_reader:
                     if isinstance(data, bytes):
-                        self.logger.info("Received bytes message: %s", len(data))
                         yield data
                     elif data.state == "stop":
                         break
