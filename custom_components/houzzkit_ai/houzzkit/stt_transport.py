@@ -32,10 +32,6 @@ def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "SttTranspor
 class SttTransport(WsTransport):
     _transport_type = "stt"
 
-    def init(self):
-        self.endpoint = self.entry.data.get(ATTR_ENDPOINT)
-        self.logger = _LOGGER
-
     async def await_message(self, timeout: int = 60):
         """Wait response message"""
         try:

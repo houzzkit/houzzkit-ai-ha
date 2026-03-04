@@ -10,7 +10,7 @@ from homeassistant.components import conversation
 from homeassistant.components.mcp_server.server import create_server
 from homeassistant.components.mcp_server.session import Session, SessionManager
 from homeassistant.exceptions import ConfigEntryAuthFailed
-
+from homeassistant.config_entries import ConfigEntry
 from ..const import DOMAIN
 from . import EntryAuthFailedError, get_entry_data
 from .ws_transport import WsTransport
@@ -60,7 +60,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry):
 class McpTransport(WsTransport):
     """Handles WebSocket transport for MCP server."""
     _transport_type = "mcp"
-    _mcp_server = None
 
     async def _create_server(self, context: llm.LLMContext):
         """Create MCP server instance."""

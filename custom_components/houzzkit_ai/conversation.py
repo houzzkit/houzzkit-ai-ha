@@ -40,9 +40,6 @@ class HouzzkitConversationEntity(BaseEntity):
             entry_type=dr.DeviceEntryType.SERVICE,
         )
 
-    @property
-    def transport(self) -> llm_transport.LlmTransport:
-        return llm_transport.get_entry_transport(self.hass, self.entry)
     
     @property
     def supported_languages(self):
@@ -55,7 +52,8 @@ class HouzzkitConversationEntity(BaseEntity):
         chat_log: ChatLog,
     ) -> ConversationResult:
         """Call the API."""
-        if not await self.transport.ensure_connected():
+        transport = llm_transport.get_entry_transport(self.hass, self.entry)
+        if not await transport.ensure_connected():
             raise HomeAssistantError("Failed to establish WebSocket connection for LLM")
 
         try:
@@ -66,21 +64,22 @@ class HouzzkitConversationEntity(BaseEntity):
         except conversation.ConverseError as err:
             return err.as_conversation_result()
 
-        await self._async_handle_chat_log(user_input, chat_log)
+        await self._async_handle_chat_log(transport, user_input, chat_log)
         return conversation.async_get_result_from_chat_log(user_input, chat_log)
 
     async def _async_handle_chat_log(
         self,
+        transport: llm_transport.LlmTransport,
         user_input: ConversationInput,
         chat_log: conversation.ChatLog,
     ):
-        await self.transport.send_message(json.dumps({
+        await transport.send_message(json.dumps({
             "type": "listen",
             "state": "detect",
             "text": user_input.text,
         }))
         async for content in chat_log.async_add_delta_content_stream(
             self.entity_id,
-            self.transport.await_message() # type: ignore
+            transport.await_message() # type: ignore
         ):
             _LOGGER.info("LLM response: %s", content)

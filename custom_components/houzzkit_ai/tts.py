@@ -28,6 +28,7 @@ class HouzzkitTtsEntity(BaseEntity):
     opus_frame_samples = int(opus_sample_rate * opus_frame_duration / 1000)
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
+        _LOGGER.info("HouzzkitTtsEntity.__init__")
         self.hass = hass
         self.entry = entry
         self.entity_id = f"{self.domain}.houzzkit_speech"
@@ -44,30 +45,29 @@ class HouzzkitTtsEntity(BaseEntity):
         self._attr_supported_options = []
         self._attr_extra_state_attributes = {}
     
-    @property
-    def transport(self) -> tts_transport.TtsTransport:
-        return tts_transport.get_entry_transport(self.hass, self.entry)
-    
     async def async_added_to_hass(self):
+        _LOGGER.info("HouzzkitTtsEntity.async_added_to_hass")
         await super().async_added_to_hass()
     
 
     async def async_get_tts_audio(
         self, message: str, language: str, options: dict
     ) -> TtsAudioType:
-        if not await self.transport.ensure_connected():
+        _LOGGER.info("HouzzkitTtsEntity.async_get_tts_audio: message=%s, language=%s, options=%s", message, language, options)
+        transport = tts_transport.get_entry_transport(self.hass, self.entry)
+        if not await transport.ensure_connected():
             _LOGGER.error("Failed to establish WebSocket connection for TTS")
             return None, None
 
         format = options.get("audio_format") or "mp3"
-        await self.transport.send_message({
+        await transport.send_message({
             "type": "tts",
             "state": "detect",
             "text": message,
         })
         async def data_gen():
             decoder = opuslib.Decoder(self.opus_sample_rate, self.opus_channels)
-            async for resp in self.transport.await_message():
+            async for resp in transport.await_message():
                 if isinstance(resp, bytes):
                     try:
                         resp = decoder.decode(resp, self.opus_frame_samples)

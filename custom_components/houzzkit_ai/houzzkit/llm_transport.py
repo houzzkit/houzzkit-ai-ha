@@ -31,10 +31,6 @@ def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "LlmTranspor
 class LlmTransport(WsTransport):
     _transport_type = "llm"
 
-    def init(self):
-        self.endpoint = self.entry.data.get(ATTR_ENDPOINT)
-        self.logger = _LOGGER
-
     async def await_message(self, timeout: int = 180):
         """Wait response message"""
         content = ""

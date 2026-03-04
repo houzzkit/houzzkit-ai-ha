@@ -43,7 +43,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
     """Set up the esphome component."""
-    LOGGER.info("Setup entry: %s", [entry.title, entry.entry_id])
+    LOGGER.info("Setup entry: %s", [entry.title, entry.entry_id, entry.data])
     config_type = entry.data.get("config_type")
     if config_type == "assist":
         PLATFORMS = set()

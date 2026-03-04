@@ -16,15 +16,15 @@ _LOGGER = logging.getLogger(__name__)
 
 class WsTransport:
     """Handles WebSocket transport."""
+    _transport_type = ""
+    
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, endpoint: str, attr_endpoint: str, logger=None):
         self.stop_event = asyncio.Event()
         self.endpoint = endpoint
         self.attr_endpoint = attr_endpoint
         self.reconnect_times = 0
         self.should_reconnect = True
-        self._transport_type = None
         self._current_ws = None
-        self._recv_binary = False
         self._idle_timeout = 180
         self._last_activity_time = 0
         self._is_connected = False
@@ -221,7 +221,7 @@ class WsTransport:
                 self.update_activity_time()
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     await self._process_text_message(msg)
-                elif msg.type == aiohttp.WSMsgType.BINARY and self._recv_binary:
+                elif msg.type == aiohttp.WSMsgType.BINARY:
                     await self._recv_writer.send(msg.data)
                 elif msg.type == aiohttp.WSMsgType.CLOSE:
                     self.logger.error("WebSocket closed: %s", msg.extra)

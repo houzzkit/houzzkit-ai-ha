@@ -1,9 +1,12 @@
 import hashlib
+import logging
 from aiohttp import web
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
-from homeassistant.components.http import HomeAssistantView, KEY_HASS
+from homeassistant.helpers.http import HomeAssistantView, KEY_HASS
 from ..const import DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
 
 async def async_setup_https(hass: HomeAssistant):
     this_data = hass.data.setdefault(DOMAIN, {})
@@ -54,7 +57,10 @@ class HouzzkitSetupView(HouzzkitHttpView):
             return self.json_message("uuid missing", 400)
         if uuid not in this_data:
             return self.json_message("uuid invalid", 400)
+        
         setup_data = await request.json() or {}
+        _LOGGER.info("Setup qrcode from miniprogram: %s", setup_data)
+        
         this_data[uuid] = setup_data
         return self.json_message("ok")
 
@@ -69,6 +75,8 @@ class HouzzkitRemoveView(HouzzkitHttpView):
         entry = await self.check_sign(request, speak_id)
         if not entry:
             return self.json_message("params error", 400)
+
+        _LOGGER.info("Remove entry: %s", entry.entry_id)
         await hass.config_entries.async_remove(entry.entry_id)
         return self.json_message("ok")
 

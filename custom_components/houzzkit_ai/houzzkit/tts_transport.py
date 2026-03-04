@@ -32,7 +32,6 @@ def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "TtsTranspor
 
 class TtsTransport(WsTransport):
     _transport_type = "tts"
-    _recv_binary = True
 
     async def await_message(self, timeout: int = 60):
         """Wait response message"""
@@ -40,9 +39,12 @@ class TtsTransport(WsTransport):
             with anyio.fail_after(timeout):
                 async for data in self._recv_reader:
                     if isinstance(data, bytes):
+                        self.logger.info("Received bytes message: %s", len(data))
                         yield data
                     elif data.state == "stop":
                         break
+                    else:
+                        self.logger.info("Received unknown message: %s", data)
         except TimeoutError:
             yield Dict(error="Response timeout")
 
