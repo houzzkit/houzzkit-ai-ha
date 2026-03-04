@@ -17,7 +17,7 @@ def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "TtsTranspor
     """Set up from a config entry."""
     endpoint: str | None = entry.data.get(ATTR_ENDPOINT)
     if not endpoint:
-        raise EntryAuthFailedError(entry)
+        raise EntryAuthFailedError(hass, entry)
     
     this_data: dict = get_entry_data(hass, entry)
     transport: TtsTransport | None = this_data.get(ATTR_TRANSPORT)

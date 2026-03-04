@@ -60,7 +60,8 @@ def get_entities_ids(hass, speak_id=None, mac=None):
         for entity in get_entities(hass, speak_id, mac)
     ]
 
-def EntryAuthFailedError(entry):
+def EntryAuthFailedError(hass, entry):
+    entry.async_start_reauth(hass)
     return ConfigEntryAuthFailed(
         translation_domain=DOMAIN,
         translation_key="houzzkit_auth_error",

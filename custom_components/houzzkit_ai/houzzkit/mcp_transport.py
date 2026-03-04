@@ -35,7 +35,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry):
     # - 重新配置：重建连接
     endpoint: str | None = entry.data.get(ATTR_ENDPOINT)
     if not endpoint:
-        raise EntryAuthFailedError(entry)
+        raise EntryAuthFailedError(hass, entry)
     
     this_data = get_entry_data(hass, entry)
     transport: McpTransport | None = this_data.pop(ATTR_TRANSPORT, None)
@@ -146,12 +146,8 @@ class McpTransport(WsTransport):
                     self.should_reconnect = False
                     self.logger.warning("WebSocket unauthorized, disable reconnect")
                     self.clear_endpoint_from_data()
-                    # self.entry.async_start_reauth(self.hass)
-                    raise ConfigEntryAuthFailed(
-                        translation_domain=DOMAIN,
-                        translation_key="houzzkit_auth_error",
-                        translation_placeholders={"name": self.entry.title},
-                    ) from err
+                    
+                    raise EntryAuthFailedError(self.hass, self.entry)
             except Exception as err:
                 self.logger.exception("WebSocket connection failed: %s", err)
                 raise
