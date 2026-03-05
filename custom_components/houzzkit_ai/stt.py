@@ -26,8 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
     """Set up entities."""
-    transport = await stt_transport.async_setup_entry(hass, config_entry)
-    async_add_entities([HouzzkitSttEntity(transport)])
+    async_add_entities([HouzzkitSttEntity(hass, config_entry)])
 
 class HouzzkitSttEntity(BaseEntity):
     domain = ENTITY_DOMAIN
@@ -36,10 +35,9 @@ class HouzzkitSttEntity(BaseEntity):
     opus_frame_duration = 60
     opus_frame_samples = int(opus_sample_rate * opus_frame_duration / 1000)
 
-    def __init__(self, transport: stt_transport.SttTransport):
-        self.hass = transport.hass
-        self.entry = transport.entry
-        self.transport = transport
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
+        self.hass = hass
+        self.entry = entry
         self.entity_id = f"{self.domain}.houzzkit_asr"
         self._attr_name = "Houzzkit AI 语音识别"
         self._attr_unique_id = f"{self.entry.entry_id}-{ENTITY_DOMAIN}"
@@ -56,7 +54,7 @@ class HouzzkitSttEntity(BaseEntity):
         self._attr_supported_bit_rates = [x for x in AudioBitRates]
         self._attr_supported_sample_rates = [x for x in AudioSampleRates]
         self.opus_encoder = opuslib.Encoder(self.opus_sample_rate, self.opus_channels, opuslib.APPLICATION_VOIP)
-
+    
     @property
     def supported_languages(self):
         return self._attr_supported_languages
@@ -95,21 +93,21 @@ class HouzzkitSttEntity(BaseEntity):
             metadata.bit_rate,
             metadata.sample_rate,
         )
-
-        if not await self.transport.ensure_connected():
+        transport = stt_transport.get_entry_transport(self.hass, self.entry)
+        if not await transport.ensure_connected():
             _LOGGER.error("Failed to establish WebSocket connection for STT")
             return SpeechResult(None, SpeechResultState.ERROR)
-        await self.transport.send_hello()
+        await transport.send_hello()
 
-        await self.transport.send_message({"type": "listen", "state": "start"})
+        await transport.send_message({"type": "listen", "state": "start"})
         async for chunk in wav_to_opus(stream):
-            await self.transport.send_message(chunk)
+            await transport.send_message(chunk)
             _LOGGER.info("Sent audio data, size: %s", len(chunk))
-        await self.transport.send_message({"type": "listen", "state": "stop"})
+        await transport.send_message({"type": "listen", "state": "stop"})
 
         text = None
-        async for resp in self.transport.await_message(60):
+        async for resp in transport.await_message(60):
             _LOGGER.info("Received response: %s", resp)
             if resp.type in ["stt", "tts"]:
                 text = resp.text
-        return SpeechResult(text, SpeechResultState.SUCCESS)
+        return SpeechResult(text, SpeechResultState.SUCCESS) # type: ignore

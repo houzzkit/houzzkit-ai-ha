@@ -1,6 +1,11 @@
 import json
+import logging
 from ..const import DOMAIN
 from homeassistant.helpers import entity_registry as er, instance_id
+from homeassistant.exceptions import ConfigEntryAuthFailed
+
+LOGGER = logging.getLogger(__name__)
+
 
 class Dict(dict):
     def __getattr__(self, item):
@@ -18,12 +23,13 @@ async def get_haid(hass):
     return await instance_id.async_get(hass)
 
 def get_entry_data(hass, entry, field=None, set_default=None, pop=False):
-    data = hass.data.setdefault(DOMAIN, {})
     config_type = entry.data.get("config_type")
-    if field == "mcp_transport":
-        pass
-    elif config_type == "assist":
+    if config_type == "assist":
         data = entry.runtime_data
+    else:
+        domain_data = hass.data.setdefault(DOMAIN, {})
+        data = domain_data.setdefault(entry.entry_id, {})
+        
     if field and pop:
         return data.pop(field, None)
     if field and set_default is not None:
@@ -31,6 +37,7 @@ def get_entry_data(hass, entry, field=None, set_default=None, pop=False):
     if field:
         return data.get(field)
     return data
+
 
 def get_config_entry(hass, speak_id=None, mac=None):
     for entry in hass.config_entries.async_entries(DOMAIN):
@@ -52,3 +59,11 @@ def get_entities_ids(hass, speak_id=None, mac=None):
         entity.entity_id
         for entity in get_entities(hass, speak_id, mac)
     ]
+
+def EntryAuthFailedError(hass, entry):
+    entry.async_start_reauth(hass)
+    return ConfigEntryAuthFailed(
+        translation_domain=DOMAIN,
+        translation_key="houzzkit_auth_error",
+        translation_placeholders={"name": entry.title},
+    )
