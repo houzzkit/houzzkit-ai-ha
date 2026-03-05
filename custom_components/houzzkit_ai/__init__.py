@@ -24,7 +24,7 @@ from .domain_data import DomainData
 from .entry_data import ESPHomeConfigEntry, RuntimeEntryData
 from .manager import DEVICE_CONFLICT_ISSUE_FORMAT, ESPHomeManager, cleanup_instance
 
-from .houzzkit import Dict, get_entry_data, mcp_transport
+from .houzzkit import LOGGER, Dict, get_entry_data, mcp_transport
 from .houzzkit.http import async_setup_https
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -43,6 +43,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
     """Set up the esphome component."""
+    LOGGER.info("Setup entry: %s", [entry.title, entry.entry_id, entry.data])
     config_type = entry.data.get("config_type")
     if config_type == "assist":
         PLATFORMS = set()
@@ -53,10 +54,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> b
             PLATFORMS.add(Platform.STT)
         if entry.data.get("tts_endpoint"):
             PLATFORMS.add(Platform.TTS)
-        if entry.data.get("mcp_endpoint"):
-            await mcp_transport.async_setup_entry(hass, entry)
+        await mcp_transport.async_setup_entry(hass, entry)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-        entry.async_on_unload(entry.add_update_listener(async_reload_entry))
         return True
 
     host: str = entry.data[CONF_HOST]
@@ -91,9 +90,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> b
     )
     await manager.async_start()
 
-    if not get_entry_data(hass, entry, "mcp_endpoint"):
-        await mcp_transport.async_setup_entry(hass, entry)
-
+    await mcp_transport.async_setup_entry(hass, entry)
     return True
 
 

@@ -156,13 +156,22 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         errors = {}
         schema = {}
         haid = await get_haid(self.hass)
+        reconfig_entry = None
+        if getattr(self, "_reauth_entry", None):
+            reconfig_entry = self._reauth_entry
+        elif getattr(self, "_reconfig_entry", None):
+            reconfig_entry = self._reconfig_entry
+
         if not self.setup_uuid:
             self.setup_uuid = ulid.ulid_hex()
         else:
             if user_input is None:
                 user_input = {}
+                
+            _LOGGER.info("setup_data: %s", self.setup_data)
             config_type = self.setup_data.get("config_type", "device") if self.setup_data else None
             mcp_endpoint = self.setup_data.get("mcp_endpoint") if self.setup_data else None
+            _LOGGER.info("mcp_endpoint: %s", mcp_endpoint)
 
             if config_type == "device":
                 self._host = self.setup_data[CONF_HOST]
@@ -195,7 +204,6 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                         "speak_id": self.setup_data.get("speak_id"),
                         "mcp_endpoint": mcp_endpoint,
                     }
-                    await self._sync_mcp_endpoint(mcp_endpoint)
                     self.clean_setup()
                     return await self._async_authenticate_or_add()
 
@@ -210,15 +218,10 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                     "stt_endpoint": self.setup_data.get("stt_endpoint"),
                     "tts_endpoint": self.setup_data.get("tts_endpoint"),
                 }
-                reconfig_entry = None
-                if getattr(self, "_reauth_entry", None):
-                    reconfig_entry = self._reauth_entry
-                elif getattr(self, "_reconfig_entry", None):
-                    reconfig_entry = self._reconfig_entry
-                elif entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
+                if entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
                     reconfig_entry = entry
                     _LOGGER.info("Found existing entry for %s", entry.title)
-                await self._sync_mcp_endpoint(mcp_endpoint, reconfig_entry)
+                
                 if reconfig_entry:
                     _LOGGER.debug("Update existing entry: %s", config_data)
                     return self.async_update_reload_and_abort(reconfig_entry, data=config_data)
@@ -241,6 +244,11 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
             "uuid": self.setup_uuid,
             "home_name": self.hass.config.location_name,
         }
+        if reconfig_entry and reconfig_entry.data.get("mac"):
+            params.update({
+                "mac": reconfig_entry.data.get("mac"),
+                "speak_id": reconfig_entry.data.get("speak_id"),
+            })
         return self.async_show_form(
             step_id="qrcode",
             errors=errors,
@@ -259,23 +267,6 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                 "tip": self._extra.pop("tip", ""),
             },
         )
-
-    async def _sync_mcp_endpoint(self, new_endpoint, exclude_entry: ConfigEntry = None):
-        if not new_endpoint:
-            return
-        for ent in self.hass.config_entries.async_loaded_entries(DOMAIN):
-            old_endpoint = ent.data.get("mcp_endpoint")
-            if not old_endpoint:
-                continue
-            if new_endpoint == old_endpoint:
-                continue
-            if exclude_entry and exclude_entry.entry_id == ent.entry_id:
-                continue
-            _LOGGER.info("Entry mcp endpoint changed: %s", [new_endpoint, ent.title, ent.entry_id])
-            self.hass.config_entries.async_update_entry(ent, data={
-                **ent.data,
-                "mcp_endpoint": new_endpoint,
-            })
 
     async def async_step_reauth(
         self, entry_data: Mapping[str, Any]
