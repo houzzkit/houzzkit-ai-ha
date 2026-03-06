@@ -157,7 +157,7 @@ class TurnDeviceIntentBase(intent.IntentHandler):
                 f"intent_call_service_{state.domain}_{service}",
             )
         )
-            
+
     async def _run_then_background(self, task: asyncio.Task[Any]) -> None:
         """Run task with timeout to (hopefully) catch validation errors.
 

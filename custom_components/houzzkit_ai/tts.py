@@ -28,7 +28,7 @@ class HouzzkitTtsEntity(BaseEntity):
     opus_frame_samples = int(opus_sample_rate * opus_frame_duration / 1000)
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
-        _LOGGER.info("HouzzkitTtsEntity.__init__")
+        _LOGGER.debug("HouzzkitTtsEntity.__init__")
         self.hass = hass
         self.entry = entry
         self.entity_id = f"{self.domain}.houzzkit_speech"
@@ -44,11 +44,11 @@ class HouzzkitTtsEntity(BaseEntity):
         self._attr_supported_languages = ["en", "zh", "zh-Hans"]
         self._attr_supported_options = []
         self._attr_extra_state_attributes = {}
-    
+
     async def async_added_to_hass(self):
         _LOGGER.info("HouzzkitTtsEntity.async_added_to_hass")
         await super().async_added_to_hass()
-    
+
 
     async def async_get_tts_audio(
         self, message: str, language: str, options: dict

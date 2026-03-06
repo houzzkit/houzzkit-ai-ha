@@ -57,10 +57,10 @@ class HouzzkitSetupView(HouzzkitHttpView):
             return self.json_message("uuid missing", 400)
         if uuid not in this_data:
             return self.json_message("uuid invalid", 400)
-        
+
         setup_data = await request.json() or {}
         _LOGGER.info("Setup qrcode from miniprogram: %s", setup_data)
-        
+
         this_data[uuid] = setup_data
         return self.json_message("ok")
 

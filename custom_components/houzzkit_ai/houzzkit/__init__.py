@@ -29,7 +29,7 @@ def get_entry_data(hass, entry, field=None, set_default=None, pop=False):
     else:
         domain_data = hass.data.setdefault(DOMAIN, {})
         data = domain_data.setdefault(entry.entry_id, {})
-        
+
     if field and pop:
         return data.pop(field, None)
     if field and set_default is not None:

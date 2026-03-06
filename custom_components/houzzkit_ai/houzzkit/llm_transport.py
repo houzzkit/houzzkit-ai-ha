@@ -17,12 +17,12 @@ def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "LlmTranspor
     endpoint: str | None = entry.data.get(ATTR_ENDPOINT)
     if not endpoint:
         raise EntryAuthFailedError(hass, entry)
-    
+
     this_data: dict = get_entry_data(hass, entry)
     transport: LlmTransport | None = this_data.get(ATTR_TRANSPORT)
     if transport and transport.endpoint == endpoint and transport.available:
         return transport
-    
+
     _LOGGER.info("Creating new LlmTransport for entry: %s %s", entry.entry_id, entry.title)
     transport = LlmTransport(hass, entry, endpoint, ATTR_ENDPOINT, _LOGGER)
     this_data[ATTR_TRANSPORT] = transport
@@ -30,6 +30,9 @@ def get_entry_transport(hass: HomeAssistant, entry: ConfigEntry) -> "LlmTranspor
 
 class LlmTransport(WsTransport):
     _transport_type = "llm"
+
+    def init(self):
+        self.logger = _LOGGER
 
     async def await_message(self, timeout: int = 180):
         """Wait response message"""

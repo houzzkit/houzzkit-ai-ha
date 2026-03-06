@@ -54,7 +54,7 @@ class HouzzkitSttEntity(BaseEntity):
         self._attr_supported_bit_rates = [x for x in AudioBitRates]
         self._attr_supported_sample_rates = [x for x in AudioSampleRates]
         self.opus_encoder = opuslib.Encoder(self.opus_sample_rate, self.opus_channels, opuslib.APPLICATION_VOIP)
-    
+
     @property
     def supported_languages(self):
         return self._attr_supported_languages

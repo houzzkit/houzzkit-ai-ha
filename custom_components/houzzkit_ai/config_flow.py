@@ -173,7 +173,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         else:
             if user_input is None:
                 user_input = {}
-                
+
             _LOGGER.info("setup_data: %s", self.setup_data)
             config_type = self.setup_data.get("config_type", "device") if self.setup_data else None
             mcp_endpoint = self.setup_data.get("mcp_endpoint") if self.setup_data else None
@@ -227,7 +227,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                 if entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
                     reconfig_entry = entry
                     _LOGGER.info("Found existing entry for %s", entry.title)
-                
+
                 if reconfig_entry:
                     _LOGGER.debug("Update existing entry: %s", config_data)
                     return self.async_update_reload_and_abort(reconfig_entry, data=config_data)
