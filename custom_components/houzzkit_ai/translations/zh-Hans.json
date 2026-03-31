@@ -81,12 +81,15 @@
                 },
                 "description": "请输入您设备的连接设置。"
             },
-            "qrcode": {
+            "qrcode_done": {
                 "description": "{tip}",
                 "data": {
                     "submit_confirm": "确认无误"
                 }
             }
+        },
+        "progress": {
+            "qrcode": "{tip}"
         }
     },
     "entity": {
