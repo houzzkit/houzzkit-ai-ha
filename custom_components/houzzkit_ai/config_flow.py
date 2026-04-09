@@ -19,6 +19,7 @@ from aioesphomeapi import (
     ResolveAPIError,
 )
 import aiohttp
+import asyncio
 import voluptuous as vol
 
 from homeassistant.components import zeroconf
@@ -59,7 +60,7 @@ from .dashboard import async_get_or_create_dashboard_manager, async_set_dashboar
 from .encryption_key_storage import async_get_encryption_key_storage
 from .entry_data import ESPHomeConfigEntry
 from .manager import async_replace_device
-from .houzzkit import Dict, get_haid
+from .houzzkit import Dict, get_haid, generate_qr_code
 from .houzzkit.http import async_setup_https
 
 ERROR_REQUIRES_ENCRYPTION_KEY = "requires_encryption_key"
@@ -107,6 +108,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
 
     _reauth_entry: ConfigEntry
     _reconfig_entry: ConfigEntry
+    _wait_task: asyncio.Task | None = None
 
     def __init__(self) -> None:
         """Initialize flow."""
@@ -153,120 +155,135 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
 
     async def async_step_qrcode(self, user_input=None):
         await async_setup_https(self.hass)
-        errors = {}
-        schema = {}
-        haid = await get_haid(self.hass)
-        reconfig_entry = None
-        if getattr(self, "_reauth_entry", None):
-            reconfig_entry = self._reauth_entry
-        elif getattr(self, "_reconfig_entry", None):
-            reconfig_entry = self._reconfig_entry
-
+        if not self._wait_task:
+            self._wait_task = self.hass.async_create_task(self._wait_for_setup_data())
+        if self._wait_task.done():
+            return self.async_show_progress_done(next_step_id="qrcode_done")
         if not self.setup_uuid:
             self.setup_uuid = ulid.ulid_hex()
-        else:
-            if user_input is None:
-                user_input = {}
-                
-            _LOGGER.info("setup_data: %s", self.setup_data)
-            config_type = self.setup_data.get("config_type", "device") if self.setup_data else None
-            mcp_endpoint = self.setup_data.get("mcp_endpoint") if self.setup_data else None
-            _LOGGER.info("mcp_endpoint: %s", mcp_endpoint)
-
-            if config_type == "device":
-                self._host = self.setup_data[CONF_HOST]
-                port = self.setup_data.get(CONF_PORT, 6053)
-                try:
-                    self._port = int(port)
-                except (TypeError, ValueError):
-                    self._port = 6053
-                    _LOGGER.exception(f"Invalid port value '{port}', using default 6053")
-                self._noise_psk = self.setup_data.get(CONF_NOISE_PSK)
-                error = await self.fetch_device_info()
-                self._name = self.setup_data.get("speak_name") or self._name
-                if error:
-                    errors["base"] = error
-                elif not user_input.get("submit_confirm"):
-                    self._extra.tip = "\n".join([
-                        "设备信息如下:",
-                        f"**名称**: {self._name}",
-                        f"**IP**: {self._host}"
-                        f"**MAC**: {self._device_mac}",
-                    ])
-                    schema = {
-                        vol.Required("submit_confirm", default=True): selector.BooleanSelector(),
-                    }
-                else:
-                    self._extra.config_data = {
-                        "config_type": config_type,
-                        "uuid": self.setup_uuid,
-                        "mac": self._device_mac,
-                        "speak_id": self.setup_data.get("speak_id"),
-                        "mcp_endpoint": mcp_endpoint,
-                    }
-                    self.clean_setup()
-                    return await self._async_authenticate_or_add()
-
-            if config_type == "assist":
-                config_data = {
-                    "config_type": config_type,
-                    "uuid": self.setup_uuid,
-                    "speak_id": self.setup_data.get("speak_id"),
-                    CONF_DEVICE_NAME: self.setup_data.get("speak_name", ""),
-                    "mcp_endpoint": mcp_endpoint,
-                    "llm_endpoint": self.setup_data.get("llm_endpoint"),
-                    "stt_endpoint": self.setup_data.get("stt_endpoint"),
-                    "tts_endpoint": self.setup_data.get("tts_endpoint"),
-                }
-                if entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
-                    reconfig_entry = entry
-                    _LOGGER.info("Found existing entry for %s", entry.title)
-                
-                if reconfig_entry:
-                    _LOGGER.debug("Update existing entry: %s", config_data)
-                    return self.async_update_reload_and_abort(reconfig_entry, data=config_data)
-
-                await self.async_set_unique_id(haid)
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title="Houzzkit AI",
-                    data=config_data,
-                )
-
-        internal = get_url(self.hass, prefer_external=False)
-        if not self._extra.tip:
-            haip = internal.split("//")[1].split(":")[0]
-            self._extra.tip = "\n".join([
-                f"您的 HomeAssistant 局域网IP地址为: **{haip}**",
-            ])
         params = {
-            "haid": haid,
+            "haid": await get_haid(self.hass),
             "uuid": self.setup_uuid,
             "home_name": self.hass.config.location_name,
         }
+        reconfig_entry = self._get_reconfig_entry()
         if reconfig_entry and reconfig_entry.data.get("mac"):
             params.update({
                 "mac": reconfig_entry.data.get("mac"),
                 "speak_id": reconfig_entry.data.get("speak_id"),
             })
-        return self.async_show_form(
+        internal = get_url(self.hass, prefer_external=False)
+        external = get_url(self.hass, prefer_external=True) or internal
+        haip = internal.split("//")[1].split(":")[0]
+        image = generate_qr_code(f"{external}/api/houzzkit-ai/setup/qrcode?{urlencode(params)}")
+        self._extra.tip = "\n".join([
+            f"您的 HomeAssistant 局域网IP地址为: **{haip}**",
+            f"\n{image}",
+        ])
+        return self.async_show_progress(
             step_id="qrcode",
-            errors=errors,
-            data_schema=vol.Schema(
-                schema or {
-                    vol.Optional("qrcode"): selector.QrCodeSelector(
-                        config=selector.QrCodeSelectorConfig(
-                            data=f"{internal}/api/houzzkit-ai/setup/qrcode?{urlencode(params)}",
-                            scale=5,
-                            error_correction_level=selector.QrErrorCorrectionLevel.QUARTILE,
-                        ),
-                    ),
-                },
-            ),
+            progress_action="qrcode",
             description_placeholders={
                 "tip": self._extra.pop("tip", ""),
             },
+            progress_task=self._wait_task,
         )
+
+    async def async_step_qrcode_done(self, user_input=None):
+        errors = {}
+        schema = {}
+        haid = await get_haid(self.hass)
+        if user_input is None:
+            user_input = {}
+
+        _LOGGER.info("setup_data: %s", self.setup_data)
+        config_type = self.setup_data.get("config_type", "device") if self.setup_data else None
+        mcp_endpoint = self.setup_data.get("mcp_endpoint") if self.setup_data else None
+        _LOGGER.info("mcp_endpoint: %s", mcp_endpoint)
+
+        if config_type == "device":
+            self._name = self.setup_data.get("speak_name") or self._name
+            self._host = self.setup_data[CONF_HOST]
+            port = self.setup_data.get(CONF_PORT, 6053)
+            try:
+                self._port = int(port)
+            except (TypeError, ValueError):
+                self._port = 6053
+                _LOGGER.exception(f"Invalid port value '{port}', using default 6053")
+            self._noise_psk = self.setup_data.get(CONF_NOISE_PSK)
+            error = await self.fetch_device_info()
+            if error:
+                errors["base"] = error
+            elif not user_input.get("submit_confirm"):
+                self._extra.tip = "\n".join([
+                    "设备信息如下:",
+                    f"**名称**: {self._name}",
+                    f"**IP**: {self._host}"
+                    f"**MAC**: {self._device_mac}",
+                ])
+                schema = {
+                    vol.Required("submit_confirm", default=True): selector.BooleanSelector(),
+                }
+            else:
+                self._extra.config_data = {
+                    "config_type": config_type,
+                    "uuid": self.setup_uuid,
+                    "mac": self._device_mac,
+                    "speak_id": self.setup_data.get("speak_id"),
+                    "mcp_endpoint": mcp_endpoint,
+                }
+                self.clean_setup()
+                return await self._async_authenticate_or_add()
+
+        if config_type == "assist":
+            config_data = {
+                "config_type": config_type,
+                "uuid": self.setup_uuid,
+                "speak_id": self.setup_data.get("speak_id"),
+                CONF_DEVICE_NAME: self.setup_data.get("speak_name", ""),
+                "mcp_endpoint": mcp_endpoint,
+                "llm_endpoint": self.setup_data.get("llm_endpoint"),
+                "stt_endpoint": self.setup_data.get("stt_endpoint"),
+                "tts_endpoint": self.setup_data.get("tts_endpoint"),
+            }
+            reconfig_entry = self._get_reconfig_entry()
+            if entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
+                reconfig_entry = entry
+                _LOGGER.info("Found existing entry for %s", entry.title)
+            if reconfig_entry:
+                _LOGGER.debug("Update existing entry: %s", config_data)
+                return self.async_update_reload_and_abort(reconfig_entry, data=config_data)
+
+            await self.async_set_unique_id(haid)
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(
+                title="Houzzkit AI",
+                data=config_data,
+            )
+
+        if schema:
+            return self.async_show_form(
+                step_id="qrcode_done",
+                errors=errors,
+                data_schema=vol.Schema(schema),
+                description_placeholders={
+                    "tip": self._extra.pop("tip", ""),
+                },
+            )
+        return self.async_step_qrcode_done(user_input)
+
+    async def _wait_for_setup_data(self):
+        while True:
+            if self.setup_data:
+                break
+            await asyncio.sleep(0.3)
+
+    def _get_reconfig_entry(self):
+        if getattr(self, "_reauth_entry", None):
+            return self._reauth_entry
+        if getattr(self, "_reconfig_entry", None):
+            return self._reconfig_entry
+        return None
 
     async def async_step_reauth(
         self, entry_data: Mapping[str, Any]
