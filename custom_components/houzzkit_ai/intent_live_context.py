@@ -75,11 +75,10 @@ def _get_exposed_entities(
             continue
 
         entity_entry = entity_registry.async_get(state.entity_id)
-        names = [state.name]
+        names = intent.async_get_entity_aliases(hass, entity_entry, state=state)
         area_names = []
 
         if entity_entry is not None:
-            names.extend(entity_entry.aliases)
             if entity_entry.area_id and (
                 area := area_registry.async_get_area(entity_entry.area_id)
             ):
