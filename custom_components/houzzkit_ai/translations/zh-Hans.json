@@ -111,6 +111,11 @@
         },
         "select": {
             "pipeline": {
+                "state": {
+                    "preferred": "首选"
+                }
+            },
+            "pipeline_n": {
                 "name": "助手 {index}",
                 "state": {
                     "preferred": "首选"
@@ -125,6 +130,12 @@
                 }
             },
             "wake_word": {
+                "state": {
+                    "no_wake_word": "无唤醒词",
+                    "okay_nabu": "Okay Nabu"
+                }
+            },
+            "wake_word_n": {
                 "name": "唤醒词 {index}",
                 "state": {
                     "no_wake_word": "无唤醒词",

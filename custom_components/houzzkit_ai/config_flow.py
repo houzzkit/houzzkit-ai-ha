@@ -31,6 +31,7 @@ from homeassistant.config_entries import (
     SOURCE_RECONFIGURE,
     ConfigEntry,
     ConfigEntryBaseFlow,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
     FlowType,
@@ -104,7 +105,6 @@ class BaseFlow(ConfigEntryBaseFlow):
     def clean_setup(self):
         self.this_data.pop(self.setup_uuid, None)
         self._extra.pop("setup_uuid", None)
-
 
 class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
     """Handle a esphome config flow."""
@@ -501,6 +501,11 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         if configured_host == host and (port is None or configured_port == port):
             # Don't probe to verify the mac is correct since
             # the host matches (and port matches if provided).
+            raise AbortFlow("already_configured")
+        # If the entry is loaded and the device is currently connected,
+        # don't update the host. This prevents transient mDNS announcements
+        # (e.g., during WiFi mesh roaming) from overwriting a working connection.
+        if entry.state is ConfigEntryState.LOADED and entry.runtime_data.available:
             raise AbortFlow("already_configured")
         configured_psk: str | None = entry.data.get(CONF_NOISE_PSK)
         await self._fetch_device_info(host, port or configured_port, configured_psk)
@@ -1082,6 +1087,4 @@ class OptionsFlowHandler(OptionsFlowWithReload):
                 ): bool,
             }
         )
-        defaults = dict(self.config_entry.options)
-        data_schema = self.add_suggested_values_to_schema(data_schema, defaults)
         return self.async_show_form(step_id="init", data_schema=data_schema)
