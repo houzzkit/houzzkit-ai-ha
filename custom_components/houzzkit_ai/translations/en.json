@@ -81,12 +81,15 @@
                 },
                 "description": "Please enter connection settings of your device."
             },
-            "qrcode": {
+            "qrcode_done": {
                 "description": "{tip}",
                 "data": {
                     "submit_confirm": "Confirmed"
                 }
             }
+        },
+        "progress": {
+            "qrcode": "{tip}"
         }
     },
     "entity": {
