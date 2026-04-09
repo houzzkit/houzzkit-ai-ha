@@ -17,6 +17,6 @@
     "bleak-esphome>=3.4.0",
     "opuslib_next>=1.0.0"
   ],
-  "version": "2025.11.4",
+  "version": "2025.11.5",
   "zeroconf": []
 }
