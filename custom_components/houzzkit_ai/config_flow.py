@@ -178,10 +178,10 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
                 "mac": reconfig_entry.data.get("mac"),
                 "speak_id": reconfig_entry.data.get("speak_id"),
             })
-        internal = get_url(self.hass, prefer_external=False)
-        external = get_url(self.hass, prefer_external=True) or internal
+        external = get_url(self.hass, prefer_external=True)
+        internal = get_url(self.hass, prefer_external=False) or external
         haip = internal.split("//")[1].split(":")[0]
-        image = generate_qr_code(f"{external}/api/houzzkit-ai/setup/qrcode?{urlencode(params)}")
+        image = generate_qr_code(f"{internal}/api/houzzkit-ai/setup/qrcode?{urlencode(params)}")
         self._extra.tip = "\n".join([
             f"您的 HomeAssistant 局域网IP地址为: **{haip}**",
             f"\n{image}",
