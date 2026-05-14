@@ -16,6 +16,7 @@ from homeassistant.util import yaml as yaml_util
 from homeassistant.util.json import JsonObjectType
 
 from .houzzkit import get_entities
+from .intent_helper import get_entity_aliases_compat
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,11 +76,10 @@ def _get_exposed_entities(
             continue
 
         entity_entry = entity_registry.async_get(state.entity_id)
-        names = [state.name]
+        names = get_entity_aliases_compat(hass, entity_entry, state)
         area_names = []
 
         if entity_entry is not None:
-            names.extend(entity_entry.aliases)
             if entity_entry.area_id and (
                 area := area_registry.async_get_area(entity_entry.area_id)
             ):

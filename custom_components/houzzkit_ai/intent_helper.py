@@ -21,9 +21,45 @@ def target_paramter_type():
             vol.Optional("area"): cv.string,
         })])
 
-def get_entity_name(entity_entry: er.RegistryEntry, state: State) -> str:
-    if len(entity_entry.aliases) > 0:
-        return list(entity_entry.aliases)[0]
+def get_entity_aliases_compat(
+    hass: HomeAssistant,
+    entity_entry: er.RegistryEntry | None,
+    state: State,
+    *,
+    allow_empty: bool = True,
+) -> list[str]:
+    """Return entity names/aliases across Home Assistant versions."""
+    alias_getter: Any = getattr(intent, "async_get_entity_aliases", None)
+    if alias_getter is not None:
+        return alias_getter(
+            hass, entity_entry, state=state, allow_empty=allow_empty
+        )
+
+    if entity_entry is None:
+        return [state.name]
+
+    entity_alias_getter: Any = getattr(er, "async_get_entity_aliases", None)
+    if entity_alias_getter is not None:
+        return entity_alias_getter(hass, entity_entry, allow_empty=allow_empty)
+
+    aliases = [alias for alias in entity_entry.aliases if isinstance(alias, str)]
+    if allow_empty:
+        return [state.name, *aliases]
+    if aliases:
+        return aliases
+    if entity_entry.name:
+        return [entity_entry.name]
+    return [state.name]
+
+
+def get_entity_name(
+    hass: HomeAssistant, entity_entry: er.RegistryEntry, state: State
+) -> str:
+    aliases = get_entity_aliases_compat(
+        hass, entity_entry, state, allow_empty=False
+    )
+    if aliases:
+        return aliases[0]
     
     if entity_entry.name:
         return entity_entry.name
@@ -143,7 +179,7 @@ async def match_intent_entities(intent_obj: intent.Intent, targets: list[HaTarge
                 # The devices must in unset area.
                 continue
             
-            entity_name = get_entity_name(entity_entry, state)
+            entity_name = get_entity_name(hass, entity_entry, state)
             on_off = "off" if state.state == "off" else "on"
             entity_info = EntityInfo(name=entity_name, area=entity_area, state=state, entity=entity_entry, on_off=on_off)
             _LOGGER.info(f"Match intent available target: {entity_info}")
