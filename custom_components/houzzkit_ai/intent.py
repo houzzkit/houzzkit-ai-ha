@@ -4,6 +4,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import intent
 
 from .intent_adjust_attribute import AdjustDeviceAttributeIntent
+from .intent_automation import (
+    HouzzkitCreateAutomationIntent,
+    HouzzkitListAutomationContextIntent,
+    HouzzkitValidateAutomationIntent,
+)
 from .intent_live_context import HouzzkitGetLiveContextIntent
 from .intent_set_mode import SetDeviceModeIntent
 from .intent_turn import TurnDeviceOffIntent, TurnDeviceOnIntent
@@ -15,6 +20,9 @@ async def async_setup_intents(hass: HomeAssistant):
     """Set up the intents."""
     _LOGGER.info("Register houzzkit-ai intents begin")
     intent.async_register(hass, HouzzkitGetLiveContextIntent())
+    intent.async_register(hass, HouzzkitListAutomationContextIntent())
+    intent.async_register(hass, HouzzkitValidateAutomationIntent())
+    intent.async_register(hass, HouzzkitCreateAutomationIntent())
     intent.async_register(hass, TurnDeviceOnIntent())
     intent.async_register(hass, TurnDeviceOffIntent())
     intent.async_register(hass, SetDeviceModeIntent())
