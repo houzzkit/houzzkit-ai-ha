@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from datetime import date, datetime, time, timedelta
 import logging
 import os
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -18,16 +20,26 @@ from homeassistant.components.button.const import SERVICE_PRESS as SERVICE_PRESS
 from homeassistant.components.cover.const import DOMAIN as COVER_DOMAIN
 from homeassistant.components.input_button import DOMAIN as INPUT_BUTTON_DOMAIN
 from homeassistant.components.lock.const import DOMAIN as LOCK_DOMAIN
+from homeassistant.components.text import (
+    ATTR_VALUE as TEXT_ATTR_VALUE,
+    DOMAIN as TEXT_DOMAIN,
+    SERVICE_SET_VALUE as TEXT_SERVICE_SET_VALUE,
+)
 from homeassistant.components.valve.const import DOMAIN as VALVE_DOMAIN
 from homeassistant.config import AUTOMATION_CONFIG_PATH
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     CONF_ACTIONS,
     CONF_ALIAS,
+    CONF_AT,
+    CONF_CONDITION,
     CONF_CONDITIONS,
     CONF_ID,
     CONF_MODE,
+    CONF_PLATFORM,
     CONF_TRIGGERS,
+    CONF_VALUE_TEMPLATE,
+    CONF_WEEKDAY,
     SERVICE_CLOSE_COVER,
     SERVICE_CLOSE_VALVE,
     SERVICE_LOCK,
@@ -42,18 +54,38 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import intent
+from homeassistant.util import dt as dt_util
 from homeassistant.util.file import write_utf8_file_atomic
 from homeassistant.util.json import JsonObjectType
 from homeassistant.util.yaml import dump, load_yaml
 
+from .const import DOMAIN
+from .houzzkit import get_entities
 from .intent_helper import EntityInfo, match_intent_entities
 from .intent_live_context import _get_exposed_entities
 
 _LOGGER = logging.getLogger(__name__)
 _AUTOMATION_WRITE_LOCK = asyncio.Lock()
 _AUTOMATION_ID_PREFIX = "houzzkit_ai_"
-_ACTION_SERVICE_DOMAINS = {"notify", "persistent_notification", "scene", "script"}
+_ACTION_SERVICE_DOMAINS = {"scene", "script"}
+_REJECTED_NOTIFICATION_DOMAINS = {"notify", "persistent_notification"}
+_REJECTED_NOTIFICATION_ACTIONS = {f"{DOMAIN}.speaker_notify", "notify.speaker"}
+_HOUZZKIT_NOTIFY_ACTION = f"{DOMAIN}.notify"
+_HOUZZKIT_WARN_ACTION = f"{DOMAIN}.warn"
+_HOUZZKIT_NOTIFICATION_ACTIONS = {_HOUZZKIT_NOTIFY_ACTION, _HOUZZKIT_WARN_ACTION}
+_VOICE_TEXT_HINTS = ("播放语音", "bo_fang_yu_yin")
 _RESOLVED_TARGETS_FIELD = "resolved_targets"
+_SUPPORTED_PLAN_FEATURES = ["time_trigger_date", "time_trigger_delay"]
+_CURRENT_DATE_FIELD = "current_date"
+_DELAY_DURATION_FIELDS = {"days", "hours", "minutes", "seconds"}
+_DELAY_TRIGGER_CONFLICT_FIELDS = {CONF_AT, "date", CONF_WEEKDAY}
+_LOCAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_LOCAL_TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
+_ONE_SHOT_TRIGGER_ID_PREFIX = "houzzkit_ai_once_"
+_AUTOMATION_SLOT_SCHEMA = {
+    vol.Required("automation"): dict,
+    vol.Optional("_speaker_id"): str,
+}
 
 
 class HouzzkitListAutomationContextIntent(intent.IntentHandler):
@@ -89,6 +121,8 @@ class HouzzkitListAutomationContextIntent(intent.IntentHandler):
             "entities": entities,
             "services": action_services,
             "supported_actions": action_services,
+            "supported_plan_features": _SUPPORTED_PLAN_FEATURES,
+            _CURRENT_DATE_FIELD: dt_util.now().date().isoformat(),
             "existing_automations": existing_automations,
             "automation_create_supported": True,
         }
@@ -103,7 +137,7 @@ class HouzzkitValidateAutomationIntent(intent.IntentHandler):
     @property
     def slot_schema(self) -> dict | None:
         """Return a slot schema."""
-        return {vol.Required("automation"): dict}
+        return _AUTOMATION_SLOT_SCHEMA
 
     async def async_handle(  # type: ignore[override]
         self,
@@ -124,7 +158,7 @@ class HouzzkitCreateAutomationIntent(intent.IntentHandler):
     @property
     def slot_schema(self) -> dict | None:
         """Return a slot schema."""
-        return {vol.Required("automation"): dict}
+        return _AUTOMATION_SLOT_SCHEMA
 
     async def async_handle(  # type: ignore[override]
         self,
@@ -168,7 +202,20 @@ def _list_action_services(
     """列出非设备动作服务；设备动作必须通过公开 target/area 解析。"""
     allowed_domains = _ACTION_SERVICE_DOMAINS
     services = hass.services.async_services()
-    actions: list[dict[str, str]] = []
+    actions: list[dict[str, str]] = [
+        {
+            "name": _HOUZZKIT_NOTIFY_ACTION,
+            "service": _HOUZZKIT_NOTIFY_ACTION,
+            "display_name": "当前音箱普通播报",
+            "description": "Use data.message to play text on the current speaker.",
+        },
+        {
+            "name": _HOUZZKIT_WARN_ACTION,
+            "service": _HOUZZKIT_WARN_ACTION,
+            "display_name": "当前音箱警告播报",
+            "description": "Use data.message to play warning text on the current speaker.",
+        }
+    ]
     for domain in sorted(allowed_domains):
         for service in sorted(services.get(domain, {})):
             name = f"{domain}.{service}"
@@ -297,6 +344,18 @@ async def _automation_config_from_internal_plan(
         return {}, errors
 
     converted = deepcopy(automation)
+    _convert_plan_time_triggers(converted, errors)
+    _reject_delay_conditions(
+        converted.get(CONF_CONDITIONS),
+        errors,
+        path="automation.conditions",
+    )
+    _reject_delay_conditions(
+        converted.get("condition"),
+        errors,
+        path="automation.condition",
+    )
+
     await _convert_rules_with_resolved_targets(
         intent_obj,
         converted.get(CONF_TRIGGERS),
@@ -311,23 +370,348 @@ async def _automation_config_from_internal_plan(
             path="automation.conditions",
         )
 
-    actions = converted.get(CONF_ACTIONS)
-    if isinstance(actions, list):
-        converted_actions: list[dict[str, Any]] = []
-        for index, action in enumerate(actions):
-            converted_actions.extend(
-                await _convert_action_with_resolved_targets(
-                    intent_obj,
-                    action,
-                    errors,
-                    path=f"automation.actions[{index}]",
+    for actions_key in (CONF_ACTIONS, "action"):
+        actions = converted.get(actions_key)
+        if isinstance(actions, list):
+            converted_actions: list[dict[str, Any]] = []
+            for index, action in enumerate(actions):
+                converted_actions.extend(
+                    await _convert_action_with_resolved_targets(
+                        intent_obj,
+                        action,
+                        errors,
+                        path=f"automation.{actions_key}[{index}]",
+                    )
                 )
-            )
-        converted[CONF_ACTIONS] = converted_actions
+            converted[actions_key] = converted_actions
 
     if errors:
         return {}, errors
     return _automation_config_for_write(automation_id, converted), []
+
+
+def _convert_plan_time_triggers(
+    automation: dict[str, Any],
+    errors: list[str],
+) -> None:
+    """把 ai-server 的日期/延迟协议转换为 HA 可加载的 time trigger。"""
+    trigger_nodes = _automation_trigger_nodes(automation)
+    if not trigger_nodes:
+        return
+
+    id_counts = _trigger_id_counts(trigger_nodes)
+    used_ids = set(id_counts)
+    generated_id_index = 1
+    one_shot_triggers: list[tuple[str, str]] = []
+
+    for path, trigger in trigger_nodes:
+        trigger_type = trigger.get("trigger") or trigger.get(CONF_PLATFORM)
+        target_dt: datetime | None = None
+
+        if "timezone" in trigger:
+            errors.append(f"{path}.timezone is not supported")
+
+        if "date" in trigger and trigger_type != "time":
+            errors.append(f"{path}.date is only supported on time triggers")
+            continue
+
+        if trigger_type == "delay":
+            target_dt = _target_datetime_from_delay_trigger(trigger, errors, path=path)
+        elif trigger_type == "time" and "date" in trigger:
+            target_dt = _target_datetime_from_date_trigger(trigger, errors, path=path)
+
+        if target_dt is None:
+            continue
+
+        trigger_id = trigger.get(CONF_ID)
+        if (
+            not isinstance(trigger_id, str)
+            or not trigger_id.strip()
+            or id_counts.get(trigger_id, 0) > 1
+        ):
+            while True:
+                trigger_id = f"{_ONE_SHOT_TRIGGER_ID_PREFIX}{generated_id_index}"
+                generated_id_index += 1
+                if trigger_id not in used_ids:
+                    break
+            trigger[CONF_ID] = trigger_id
+            used_ids.add(trigger_id)
+
+        _rewrite_one_shot_trigger(trigger, target_dt)
+        one_shot_triggers.append((trigger_id, target_dt.date().isoformat()))
+
+    if one_shot_triggers:
+        guard = _one_shot_date_guard_condition(
+            one_shot_triggers,
+            total_trigger_count=len(trigger_nodes),
+        )
+        _append_automation_condition(automation, guard)
+
+
+def _automation_trigger_nodes(
+    automation: dict[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    nodes: list[tuple[str, dict[str, Any]]] = []
+    for key in (CONF_TRIGGERS, "trigger"):
+        triggers = automation.get(key)
+        if isinstance(triggers, list):
+            for index, trigger in enumerate(triggers):
+                if isinstance(trigger, dict):
+                    nodes.append((f"automation.{key}[{index}]", trigger))
+        elif isinstance(triggers, dict):
+            nodes.append((f"automation.{key}", triggers))
+    return nodes
+
+
+def _trigger_id_counts(
+    trigger_nodes: list[tuple[str, dict[str, Any]]],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for _path, trigger in trigger_nodes:
+        trigger_id = trigger.get(CONF_ID)
+        if isinstance(trigger_id, str) and trigger_id.strip():
+            counts[trigger_id] = counts.get(trigger_id, 0) + 1
+    return counts
+
+
+def _target_datetime_from_date_trigger(
+    trigger: dict[str, Any],
+    errors: list[str],
+    *,
+    path: str,
+) -> datetime | None:
+    unsupported_keys = sorted(
+        key
+        for key in trigger
+        if key
+        not in {"trigger", CONF_PLATFORM, CONF_ID, "date", CONF_AT, CONF_WEEKDAY}
+    )
+    if unsupported_keys:
+        errors.append(
+            f"{path} time date trigger contains unsupported keys: {unsupported_keys}"
+        )
+
+    if CONF_WEEKDAY in trigger:
+        errors.append(f"{path}.date cannot be used with weekday")
+
+    date_value = _parse_local_date(trigger.get("date"), errors, path=f"{path}.date")
+    at_value = _parse_local_time(trigger.get(CONF_AT), errors, path=f"{path}.at")
+    if date_value is None or at_value is None:
+        return None
+
+    target_dt = datetime.combine(
+        date_value,
+        at_value,
+        tzinfo=dt_util.get_default_time_zone(),
+    )
+    if target_dt <= dt_util.now():
+        errors.append(f"{path} target datetime is in the past")
+        return None
+    return target_dt
+
+
+def _target_datetime_from_delay_trigger(
+    trigger: dict[str, Any],
+    errors: list[str],
+    *,
+    path: str,
+) -> datetime | None:
+    unsupported_keys = sorted(
+        key
+        for key in trigger
+        if key
+        not in {"trigger", CONF_PLATFORM, CONF_ID, "duration"}
+        | _DELAY_TRIGGER_CONFLICT_FIELDS
+    )
+    if unsupported_keys:
+        errors.append(
+            f"{path} delay trigger contains unsupported keys: {unsupported_keys}"
+        )
+
+    conflict_keys = sorted(
+        key for key in _DELAY_TRIGGER_CONFLICT_FIELDS if key in trigger
+    )
+    if conflict_keys:
+        errors.append(f"{path} delay trigger cannot include {conflict_keys}")
+
+    duration = _parse_delay_duration(
+        trigger.get("duration"),
+        errors,
+        path=f"{path}.duration",
+    )
+    if duration is None:
+        return None
+
+    target_dt = dt_util.now() + duration
+    if target_dt.microsecond:
+        target_dt = target_dt.replace(microsecond=0) + timedelta(seconds=1)
+    return target_dt
+
+
+def _parse_local_date(value: Any, errors: list[str], *, path: str) -> date | None:
+    if not isinstance(value, str) or _LOCAL_DATE_RE.fullmatch(value) is None:
+        errors.append(f"{path} must use YYYY-MM-DD")
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        errors.append(f"{path} must be a valid local date")
+        return None
+
+
+def _parse_local_time(value: Any, errors: list[str], *, path: str) -> time | None:
+    if not isinstance(value, str) or _LOCAL_TIME_RE.fullmatch(value) is None:
+        errors.append(f"{path} must use HH:MM:SS")
+        return None
+    try:
+        return time.fromisoformat(value)
+    except ValueError:
+        errors.append(f"{path} must be a valid local time")
+        return None
+
+
+def _parse_delay_duration(
+    value: Any,
+    errors: list[str],
+    *,
+    path: str,
+) -> timedelta | None:
+    if not isinstance(value, dict):
+        errors.append(f"{path} must be an object")
+        return None
+
+    unsupported_keys = sorted(key for key in value if key not in _DELAY_DURATION_FIELDS)
+    if unsupported_keys:
+        errors.append(f"{path} contains unsupported keys: {unsupported_keys}")
+
+    parts: dict[str, int] = {}
+    has_positive_value = False
+    for key in sorted(_DELAY_DURATION_FIELDS):
+        raw_part = value.get(key, 0)
+        if not isinstance(raw_part, int) or isinstance(raw_part, bool) or raw_part < 0:
+            errors.append(f"{path}.{key} must be a non-negative integer")
+            continue
+        parts[key] = raw_part
+        if raw_part > 0:
+            has_positive_value = True
+
+    if not has_positive_value:
+        errors.append(f"{path} must include at least one positive value")
+        return None
+    if unsupported_keys:
+        return None
+    if len(parts) != len(_DELAY_DURATION_FIELDS):
+        return None
+
+    return timedelta(
+        days=parts["days"],
+        hours=parts["hours"],
+        minutes=parts["minutes"],
+        seconds=parts["seconds"],
+    )
+
+
+def _rewrite_one_shot_trigger(trigger: dict[str, Any], target_dt: datetime) -> None:
+    trigger.pop("trigger", None)
+    trigger.pop("date", None)
+    trigger.pop("duration", None)
+    trigger.pop(CONF_WEEKDAY, None)
+    trigger[CONF_PLATFORM] = "time"
+    trigger[CONF_AT] = target_dt.strftime("%H:%M:%S")
+
+
+def _one_shot_date_guard_condition(
+    one_shot_triggers: list[tuple[str, str]],
+    *,
+    total_trigger_count: int,
+) -> dict[str, Any]:
+    if total_trigger_count == 1:
+        return _date_template_condition(one_shot_triggers[0][1])
+
+    one_shot_ids = [trigger_id for trigger_id, _date_value in one_shot_triggers]
+    conditions: list[dict[str, Any]] = []
+    if total_trigger_count > len(one_shot_triggers):
+        conditions.append(
+            {
+                CONF_CONDITION: "not",
+                CONF_CONDITIONS: [
+                    {CONF_CONDITION: "trigger", CONF_ID: one_shot_ids}
+                ],
+            }
+        )
+
+    for trigger_id, date_value in one_shot_triggers:
+        conditions.append(
+            {
+                CONF_CONDITION: "and",
+                CONF_CONDITIONS: [
+                    {CONF_CONDITION: "trigger", CONF_ID: trigger_id},
+                    _date_template_condition(date_value),
+                ],
+            }
+        )
+
+    return {CONF_CONDITION: "or", CONF_CONDITIONS: conditions}
+
+
+def _date_template_condition(date_value: str) -> dict[str, str]:
+    return {
+        CONF_CONDITION: "template",
+        CONF_VALUE_TEMPLATE: (
+            "{{ now().strftime('%Y-%m-%d') == '" + date_value + "' }}"
+        ),
+    }
+
+
+def _append_automation_condition(
+    automation: dict[str, Any],
+    guard: dict[str, Any],
+) -> None:
+    condition_key = (
+        CONF_CONDITIONS
+        if CONF_CONDITIONS in automation or "condition" not in automation
+        else "condition"
+    )
+    existing = automation.get(condition_key)
+    if existing is None:
+        automation[condition_key] = guard
+        return
+
+    if isinstance(existing, list):
+        conditions = [*existing, guard]
+    else:
+        conditions = [existing, guard]
+    automation[condition_key] = {CONF_CONDITION: "and", CONF_CONDITIONS: conditions}
+
+
+def _reject_delay_conditions(
+    condition: Any,
+    errors: list[str],
+    *,
+    path: str,
+) -> None:
+    if condition is None:
+        return
+    if isinstance(condition, list):
+        for index, item in enumerate(condition):
+            _reject_delay_conditions(item, errors, path=f"{path}[{index}]")
+        return
+    if not isinstance(condition, dict):
+        return
+
+    condition_type = condition.get(CONF_CONDITION)
+    trigger_type = condition.get("trigger") or condition.get(CONF_PLATFORM)
+    if condition_type == "delay" or trigger_type == "delay":
+        errors.append(f"{path}.condition delay is only supported as a trigger")
+
+    children = condition.get(CONF_CONDITIONS)
+    if isinstance(children, list):
+        for index, item in enumerate(children):
+            _reject_delay_conditions(
+                item,
+                errors,
+                path=f"{path}.conditions[{index}]",
+            )
 
 
 def _raw_target_errors(value: Any) -> list[str]:
@@ -419,6 +803,26 @@ async def _convert_action_with_resolved_targets(
         errors.append(f"{path} must be an object")
         return []
 
+    action_name = _action_name(action)
+    if action.get("service") in _HOUZZKIT_NOTIFICATION_ACTIONS:
+        errors.append(f"{path}.service is not allowed; use action instead")
+        return []
+
+    if action.get("action") in _HOUZZKIT_NOTIFICATION_ACTIONS:
+        return _convert_houzzkit_notify_action(
+            intent_obj,
+            action,
+            errors,
+            path=path,
+        )
+
+    if _is_rejected_notification_action(action_name):
+        errors.append(
+            f"{path}.action uses unsupported notification service: {action_name}; "
+            f"use {_HOUZZKIT_NOTIFY_ACTION} or {_HOUZZKIT_WARN_ACTION}"
+        )
+        return []
+
     resolved_targets = action.pop(_RESOLVED_TARGETS_FIELD, None)
     if resolved_targets is None:
         if "operation" in action:
@@ -462,6 +866,158 @@ async def _convert_action_with_resolved_targets(
             }
         )
     return converted_actions
+
+
+def _action_name(action: dict[str, Any]) -> str | None:
+    for key in ("action", "service"):
+        value = action.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _is_rejected_notification_action(action_name: str | None) -> bool:
+    if action_name is None or "." not in action_name:
+        return False
+    if action_name in _HOUZZKIT_NOTIFICATION_ACTIONS:
+        return False
+    if action_name in _REJECTED_NOTIFICATION_ACTIONS:
+        return True
+    domain, _service = action_name.split(".", 1)
+    return domain in _REJECTED_NOTIFICATION_DOMAINS
+
+
+def _convert_houzzkit_notify_action(
+    intent_obj: intent.Intent,
+    action: dict[str, Any],
+    errors: list[str],
+    *,
+    path: str,
+) -> list[dict[str, Any]]:
+    action_name = action.get("action")
+    if "service" in action:
+        errors.append(f"{path}.service is not allowed for {action_name}")
+        return []
+    if _RESOLVED_TARGETS_FIELD in action:
+        errors.append(
+            f"{path}.{_RESOLVED_TARGETS_FIELD} is not allowed for "
+            f"{action_name}"
+        )
+        return []
+    if "operation" in action:
+        errors.append(f"{path}.operation is not allowed for {action_name}")
+        return []
+
+    data = action.get("data")
+    if not isinstance(data, dict):
+        errors.append(f"{path}.data must be an object")
+        return []
+
+    data_keys = set(data)
+    extra_data_keys = data_keys - {"message"}
+    if extra_data_keys:
+        errors.append(
+            f"{path}.data contains unsupported keys: {sorted(extra_data_keys)}"
+        )
+        return []
+
+    message = data.get("message")
+    if not isinstance(message, str) or not message.strip():
+        errors.append(f"{path}.data.message must be a non-empty string")
+        return []
+
+    text_entity_id = _current_speaker_voice_text_entity_id(
+        intent_obj,
+        errors,
+        path=path,
+    )
+    if text_entity_id is None:
+        return []
+
+    passthrough = {
+        key: value
+        for key, value in action.items()
+        if key not in {"action", "data", "service", "target", _RESOLVED_TARGETS_FIELD}
+    }
+    return [
+        {
+            **passthrough,
+            "action": f"{TEXT_DOMAIN}.{TEXT_SERVICE_SET_VALUE}",
+            "target": {ATTR_ENTITY_ID: text_entity_id},
+            "data": {TEXT_ATTR_VALUE: message.strip()},
+        }
+    ]
+
+
+def _current_speaker_voice_text_entity_id(
+    intent_obj: intent.Intent,
+    errors: list[str],
+    *,
+    path: str,
+) -> str | None:
+    speaker_id = _speaker_id_from_intent(intent_obj)
+    if speaker_id is None:
+        errors.append(
+            f"{path}: _speaker_id is required for "
+            f"{_HOUZZKIT_NOTIFY_ACTION}/{_HOUZZKIT_WARN_ACTION}"
+        )
+        return None
+
+    entity_entries = get_entities(intent_obj.hass, speak_id=speaker_id)
+    if not entity_entries:
+        errors.append(f"{path}: speaker not found: {speaker_id}")
+        return None
+
+    text_entries = [
+        entry
+        for entry in entity_entries
+        if entry.domain == TEXT_DOMAIN and not entry.disabled
+    ]
+    if not text_entries:
+        errors.append(f"{path}: no voice text entity found for speaker: {speaker_id}")
+        return None
+
+    hinted_entries = [entry for entry in text_entries if _is_voice_text_entry(entry)]
+    if len(hinted_entries) == 1:
+        return hinted_entries[0].entity_id
+    if len(hinted_entries) > 1:
+        entity_ids = ", ".join(entry.entity_id for entry in hinted_entries)
+        errors.append(f"{path}: ambiguous voice text entities: {entity_ids}")
+        return None
+
+    if len(text_entries) == 1:
+        return text_entries[0].entity_id
+
+    entity_ids = ", ".join(entry.entity_id for entry in text_entries)
+    errors.append(f"{path}: ambiguous text entities for speaker: {entity_ids}")
+    return None
+
+
+def _speaker_id_from_intent(intent_obj: intent.Intent) -> str | None:
+    speaker_slot = intent_obj.slots.get("_speaker_id")
+    if not isinstance(speaker_slot, dict):
+        return None
+
+    speaker_id = speaker_slot.get("value")
+    if not isinstance(speaker_id, str):
+        return None
+
+    speaker_id = speaker_id.strip()
+    return speaker_id or None
+
+
+def _is_voice_text_entry(entry: Any) -> bool:
+    values = (
+        entry.entity_id,
+        entry.name,
+        entry.original_name,
+        entry.suggested_object_id,
+        entry.unique_id,
+    )
+    searchable = " ".join(
+        str(value).casefold() for value in values if isinstance(value, str)
+    )
+    return any(hint.casefold() in searchable for hint in _VOICE_TEXT_HINTS)
 
 
 async def _match_resolved_targets(
