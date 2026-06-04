@@ -22,6 +22,7 @@ from . import dashboard, ffmpeg_proxy
 from .const import CONF_BLUETOOTH_MAC_ADDRESS, CONF_NOISE_PSK, DOMAIN
 from .domain_data import DomainData
 from .entry_data import ESPHomeConfigEntry, RuntimeEntryData
+from .intent_automation import async_setup_automation_services
 from .manager import DEVICE_CONFLICT_ISSUE_FORMAT, ESPHomeManager, cleanup_instance
 
 from .houzzkit import LOGGER, Dict, get_entry_data, mcp_transport
@@ -35,6 +36,7 @@ CLIENT_INFO = f"Home Assistant {ha_version}"
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the esphome component."""
     ffmpeg_proxy.async_setup(hass)
+    async_setup_automation_services(hass)
     await dashboard.async_setup(hass)
 
     await async_setup_https(hass)

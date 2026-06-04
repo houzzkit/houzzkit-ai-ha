@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from datetime import date, datetime, time, timedelta
+from functools import partial
 import logging
 import os
 import re
@@ -50,7 +51,7 @@ from homeassistant.const import (
     SERVICE_TURN_ON,
     SERVICE_UNLOCK,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import intent
@@ -73,6 +74,9 @@ _REJECTED_NOTIFICATION_ACTIONS = {f"{DOMAIN}.speaker_notify", "notify.speaker"}
 _HOUZZKIT_NOTIFY_ACTION = f"{DOMAIN}.notify"
 _HOUZZKIT_WARN_ACTION = f"{DOMAIN}.warn"
 _HOUZZKIT_NOTIFICATION_ACTIONS = {_HOUZZKIT_NOTIFY_ACTION, _HOUZZKIT_WARN_ACTION}
+_DELETE_ONE_SHOT_SERVICE = "delete_one_shot_automation"
+_DELETE_ONE_SHOT_ACTION = f"{DOMAIN}.{_DELETE_ONE_SHOT_SERVICE}"
+_ONE_SHOT_CLEANUP_MARKER = "houzzkit_ai_one_shot"
 _VOICE_TEXT_HINTS = ("播放语音", "bo_fang_yu_yin")
 _RESOLVED_TARGETS_FIELD = "resolved_targets"
 _SUPPORTED_PLAN_FEATURES = ["time_trigger_date", "time_trigger_delay"]
@@ -86,6 +90,8 @@ _AUTOMATION_SLOT_SCHEMA = {
     vol.Required("automation"): dict,
     vol.Optional("_speaker_id"): str,
 }
+_ONE_SHOT_AUTOMATION_TYPE = "one_shot"
+_REGULAR_AUTOMATION_TYPE = "regular"
 
 
 class HouzzkitListAutomationContextIntent(intent.IntentHandler):
@@ -168,6 +174,113 @@ class HouzzkitCreateAutomationIntent(intent.IntentHandler):
         slots = self.async_validate_slots(intent_obj.slots)
         automation = slots["automation"]["value"]
         return await _create_automation(intent_obj, automation)
+
+
+def async_setup_automation_services(hass: HomeAssistant) -> None:
+    """Register internal automation maintenance services."""
+    if hass.services.has_service(DOMAIN, _DELETE_ONE_SHOT_SERVICE):
+        return
+    hass.services.async_register(
+        DOMAIN,
+        _DELETE_ONE_SHOT_SERVICE,
+        partial(_handle_delete_one_shot_service, hass),
+        vol.Schema(
+            {
+                vol.Required(CONF_ID): str,
+                vol.Required("marker"): str,
+            }
+        ),
+    )
+
+
+@callback
+def _handle_delete_one_shot_service(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> None:
+    """Schedule one-shot automation deletion after the calling automation returns."""
+    hass.async_create_task(
+        _async_delete_one_shot_automation(
+            hass,
+            call.data[CONF_ID],
+            call.data["marker"],
+        )
+    )
+
+
+async def _async_delete_one_shot_automation(
+    hass: HomeAssistant,
+    automation_id: str,
+    marker: str,
+) -> None:
+    """Delete a Houzzkit one-shot automation if its internal marker matches."""
+    if marker != _ONE_SHOT_CLEANUP_MARKER:
+        _LOGGER.debug("Skip one-shot cleanup with invalid marker for %s", automation_id)
+        return
+    if not _is_houzzkit_automation_id(automation_id):
+        _LOGGER.debug("Skip one-shot cleanup for non-Houzzkit id: %s", automation_id)
+        return
+
+    removed = False
+    async with _AUTOMATION_WRITE_LOCK:
+        configs = await _read_automation_configs(hass)
+        remaining: list[dict[str, Any]] = []
+        for config in configs:
+            if config.get(CONF_ID) != automation_id:
+                remaining.append(config)
+                continue
+            if not _has_internal_one_shot_cleanup_action(config, automation_id):
+                _LOGGER.debug(
+                    "Skip one-shot cleanup for automation without internal marker: %s",
+                    automation_id,
+                )
+                remaining.append(config)
+                continue
+            removed = True
+
+        if not removed:
+            return
+        await _write_automation_configs(hass, remaining)
+
+    await hass.services.async_call(
+        AUTOMATION_DOMAIN,
+        SERVICE_RELOAD,
+        {},
+        blocking=True,
+    )
+
+
+def _is_houzzkit_automation_id(automation_id: str) -> bool:
+    return automation_id.startswith(_AUTOMATION_ID_PREFIX)
+
+
+def _has_internal_one_shot_cleanup_action(
+    automation: dict[str, Any],
+    automation_id: str,
+) -> bool:
+    for action in _automation_action_nodes(automation):
+        if action.get("action") != _DELETE_ONE_SHOT_ACTION:
+            continue
+        data = action.get("data")
+        if not isinstance(data, dict):
+            continue
+        if (
+            data.get(CONF_ID) == automation_id
+            and data.get("marker") == _ONE_SHOT_CLEANUP_MARKER
+        ):
+            return True
+    return False
+
+
+def _automation_action_nodes(automation: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    for key in (CONF_ACTIONS, "action"):
+        actions = automation.get(key)
+        if isinstance(actions, list):
+            nodes.extend(action for action in actions if isinstance(action, dict))
+        elif isinstance(actions, dict):
+            nodes.append(actions)
+    return nodes
 
 
 def _flatten_exposed_entities(
@@ -253,17 +366,32 @@ async def _validate_automation(
             "errors": ["automation must be an object"],
         }
 
-    config_id = automation_id or _AUTOMATION_ID_PREFIX + "validation"
-    config, errors = await _automation_config_from_internal_plan(
-        intent_obj,
-        config_id,
-        automation,
-    )
+    specs, errors = _split_automation_specs(automation)
+    if errors:
+        return {"success": True, "valid": False, "errors": errors}
+
+    base_config_id = automation_id or _AUTOMATION_ID_PREFIX + "validation"
+    config_ids = [
+        base_config_id if len(specs) == 1 else f"{base_config_id}_{index + 1}"
+        for index in range(len(specs))
+    ]
+    configs: list[tuple[str, dict[str, Any]]] = []
+    for spec, config_id in zip(specs, config_ids, strict=True):
+        config, config_errors = await _automation_config_from_internal_plan(
+            intent_obj,
+            config_id,
+            spec["automation"],
+            append_one_shot_cleanup=spec["type"] == _ONE_SHOT_AUTOMATION_TYPE,
+        )
+        errors.extend(config_errors)
+        if config:
+            configs.append((config_id, config))
     if errors:
         return {"success": True, "valid": False, "errors": errors}
 
     try:
-        await async_validate_config_item(intent_obj.hass, config_id, config)
+        for config_id, config in configs:
+            await async_validate_config_item(intent_obj.hass, config_id, config)
     except (vol.Invalid, HomeAssistantError) as exc:
         return {"success": True, "valid": False, "errors": [str(exc)]}
     except Exception as exc:  # noqa: BLE001
@@ -295,33 +423,76 @@ async def _create_automation(
                 "errors": [f"automation id already exists: {requested_id}"],
             }
 
-        automation_id = _generate_automation_id(existing_ids)
-        config, errors = await _automation_config_from_internal_plan(
-            intent_obj,
-            automation_id,
-            automation,
-        )
+        specs, errors = _split_automation_specs(automation)
         if errors:
             return {
                 "success": False,
                 "errors": errors,
             }
+
+        used_ids = set(existing_ids)
+        automation_ids: list[str] = []
+        for _spec in specs:
+            automation_id = _generate_automation_id(used_ids)
+            automation_ids.append(automation_id)
+            used_ids.add(automation_id)
+
+        prepared: list[dict[str, Any]] = []
+        for spec, automation_id in zip(specs, automation_ids, strict=True):
+            config, config_errors = await _automation_config_from_internal_plan(
+                intent_obj,
+                automation_id,
+                spec["automation"],
+                append_one_shot_cleanup=spec["type"] == _ONE_SHOT_AUTOMATION_TYPE,
+            )
+            errors.extend(config_errors)
+            if config:
+                prepared.append(
+                    {
+                        CONF_ID: automation_id,
+                        CONF_ALIAS: str(config.get(CONF_ALIAS, "")),
+                        "type": spec["type"],
+                        "config": config,
+                    }
+                )
+        if errors:
+            return {
+                "success": False,
+                "errors": errors,
+            }
+
         try:
-            await async_validate_config_item(hass, automation_id, config)
+            for item in prepared:
+                await async_validate_config_item(hass, item[CONF_ID], item["config"])
         except (vol.Invalid, HomeAssistantError) as exc:
             return {"success": False, "errors": [str(exc)]}
 
-        configs.append(config)
+        configs.extend(item["config"] for item in prepared)
         await _write_automation_configs(hass, configs)
 
     await hass.services.async_call(
         AUTOMATION_DOMAIN,
         SERVICE_RELOAD,
-        {CONF_ID: automation_id},
+        {},
         blocking=True,
     )
 
-    alias = str(config.get(CONF_ALIAS, ""))
+    if len(prepared) > 1:
+        return {
+            "success": True,
+            "automations": [
+                {
+                    CONF_ID: item[CONF_ID],
+                    CONF_ALIAS: item[CONF_ALIAS],
+                    "type": item["type"],
+                }
+                for item in prepared
+            ],
+        }
+
+    item = prepared[0]
+    automation_id = item[CONF_ID]
+    alias = item[CONF_ALIAS]
     result: dict[str, Any] = {
         "success": True,
         "id": automation_id,
@@ -338,6 +509,8 @@ async def _automation_config_from_internal_plan(
     intent_obj: intent.Intent,
     automation_id: str,
     automation: dict[str, Any],
+    *,
+    append_one_shot_cleanup: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     errors = _raw_target_errors(automation)
     if errors:
@@ -387,7 +560,177 @@ async def _automation_config_from_internal_plan(
 
     if errors:
         return {}, errors
+
+    if append_one_shot_cleanup:
+        _append_one_shot_cleanup_action(converted, automation_id)
+
     return _automation_config_for_write(automation_id, converted), []
+
+
+def _split_automation_specs(
+    automation: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    errors: list[str] = []
+    actions = _normalized_action_items(automation, errors)
+    triggers = _normalized_trigger_items(automation, errors)
+    if errors:
+        return [], errors
+
+    one_shot_triggers: list[dict[str, Any]] = []
+    regular_triggers: list[dict[str, Any]] = []
+
+    for trigger in triggers:
+        if _is_one_shot_plan_trigger(trigger):
+            one_shot_triggers.append(trigger)
+        else:
+            regular_triggers.append(trigger)
+
+    spec_count = len(one_shot_triggers) + (1 if regular_triggers else 0)
+    if spec_count > 1 and _contains_trigger_condition(automation):
+        errors.append(
+            "automation conditions cannot include trigger conditions when "
+            "one-shot triggers are split into separate automations"
+        )
+        return [], errors
+
+    specs: list[dict[str, Any]] = []
+    for trigger in one_shot_triggers:
+        specs.append(
+            {
+                "type": _ONE_SHOT_AUTOMATION_TYPE,
+                "automation": _automation_spec_from_parts(
+                    automation,
+                    [trigger],
+                    actions,
+                ),
+            }
+        )
+
+    if regular_triggers or not one_shot_triggers:
+        specs.append(
+            {
+                "type": _REGULAR_AUTOMATION_TYPE,
+                "automation": _automation_spec_from_parts(
+                    automation,
+                    regular_triggers,
+                    actions,
+                ),
+            }
+        )
+
+    return specs, errors
+
+
+def _normalized_trigger_items(
+    automation: dict[str, Any],
+    errors: list[str],
+) -> list[dict[str, Any]]:
+    triggers: list[dict[str, Any]] = []
+    for key in (CONF_TRIGGERS, "trigger"):
+        value = automation.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            invalid_count = len(
+                [item for item in value if not isinstance(item, dict)]
+            )
+            if invalid_count:
+                errors.append(f"automation.{key} items must be objects")
+            triggers.extend(deepcopy(item) for item in value if isinstance(item, dict))
+            continue
+        if isinstance(value, dict):
+            triggers.append(deepcopy(value))
+            continue
+        errors.append(f"automation.{key} must be a list or object")
+    return triggers
+
+
+def _normalized_action_items(
+    automation: dict[str, Any],
+    errors: list[str],
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for key in (CONF_ACTIONS, "action"):
+        value = automation.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            invalid_count = len(
+                [item for item in value if not isinstance(item, dict)]
+            )
+            if invalid_count:
+                errors.append(f"automation.{key} items must be objects")
+            actions.extend(deepcopy(item) for item in value if isinstance(item, dict))
+            continue
+        if isinstance(value, dict):
+            actions.append(deepcopy(value))
+            continue
+        errors.append(f"automation.{key} must be a list or object")
+    return actions
+
+
+def _automation_spec_from_parts(
+    automation: dict[str, Any],
+    triggers: list[dict[str, Any]],
+    actions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    spec = {
+        key: deepcopy(value)
+        for key, value in automation.items()
+        if key not in {CONF_ID, CONF_TRIGGERS, "trigger", CONF_ACTIONS, "action"}
+    }
+    if triggers:
+        spec[CONF_TRIGGERS] = deepcopy(triggers)
+    if actions:
+        spec[CONF_ACTIONS] = deepcopy(actions)
+    return spec
+
+
+def _is_one_shot_plan_trigger(trigger: dict[str, Any]) -> bool:
+    trigger_type = trigger.get("trigger") or trigger.get(CONF_PLATFORM)
+    return trigger_type == "delay" or (trigger_type == "time" and "date" in trigger)
+
+
+def _contains_trigger_condition(automation: dict[str, Any]) -> bool:
+    return _node_contains_trigger_condition(automation.get(CONF_CONDITIONS)) or (
+        _node_contains_trigger_condition(automation.get("condition"))
+    )
+
+
+def _node_contains_trigger_condition(node: Any) -> bool:
+    if isinstance(node, list):
+        return any(_node_contains_trigger_condition(item) for item in node)
+    if not isinstance(node, dict):
+        return False
+    if node.get(CONF_CONDITION) == "trigger":
+        return True
+    children = node.get(CONF_CONDITIONS)
+    return _node_contains_trigger_condition(children)
+
+
+def _append_one_shot_cleanup_action(
+    automation: dict[str, Any],
+    automation_id: str,
+) -> None:
+    cleanup_action = {
+        "action": _DELETE_ONE_SHOT_ACTION,
+        "data": {
+            CONF_ID: automation_id,
+            "marker": _ONE_SHOT_CLEANUP_MARKER,
+        },
+    }
+    actions = automation.pop("action", None)
+    if isinstance(actions, dict):
+        actions = [actions]
+    elif not isinstance(actions, list):
+        actions = []
+    if existing_actions := automation.get(CONF_ACTIONS):
+        if isinstance(existing_actions, list):
+            actions = [*existing_actions, *actions]
+        elif isinstance(existing_actions, dict):
+            actions = [existing_actions, *actions]
+    actions.append(cleanup_action)
+    automation[CONF_ACTIONS] = actions
 
 
 def _convert_plan_time_triggers(
@@ -804,6 +1147,10 @@ async def _convert_action_with_resolved_targets(
         return []
 
     action_name = _action_name(action)
+    if action_name == _DELETE_ONE_SHOT_ACTION:
+        errors.append(f"{path}.action is internal and cannot be provided")
+        return []
+
     if action.get("service") in _HOUZZKIT_NOTIFICATION_ACTIONS:
         errors.append(f"{path}.service is not allowed; use action instead")
         return []

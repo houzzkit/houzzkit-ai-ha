@@ -93,6 +93,37 @@ class _FakeIntent:
     hass = _FakeHass()
 
 
+class _FakeServiceRegistry:
+    def __init__(self) -> None:
+        self.registered: list[tuple[str, str, object, object]] = []
+
+    def has_service(self, domain: str, service: str) -> bool:
+        return False
+
+    def async_register(
+        self,
+        domain: str,
+        service: str,
+        service_func: object,
+        schema: object,
+    ) -> None:
+        self.registered.append((domain, service, service_func, schema))
+
+
+class _FakeSetupHass:
+    def __init__(self) -> None:
+        self.services = _FakeServiceRegistry()
+
+
+class _FakeTaskHass:
+    def __init__(self) -> None:
+        self.created_task: object | None = None
+
+    def async_create_task(self, coro: object) -> object:
+        self.created_task = coro
+        return object()
+
+
 class AutomationProtocolTest(unittest.TestCase):
     def test_list_context_returns_plan_features_and_current_date(self) -> None:
         async def fake_summaries(hass: object) -> list[dict[str, str]]:
@@ -247,6 +278,183 @@ class AutomationProtocolTest(unittest.TestCase):
         self.assertIn(
             "2026-06-03",
             guard_conditions[1]["conditions"][1]["value_template"],
+        )
+
+    def test_split_mixed_one_shot_and_regular_triggers(self) -> None:
+        automation = {
+            "alias": "Mixed automation",
+            "triggers": [
+                {"trigger": "delay", "duration": {"minutes": 3}},
+                {"trigger": "state", "entity_id": "binary_sensor.door", "to": "on"},
+            ],
+            "actions": [{"action": "script.turn_on"}],
+        }
+
+        specs, errors = ia._split_automation_specs(automation)
+
+        self.assertEqual(errors, [])
+        self.assertEqual([spec["type"] for spec in specs], ["one_shot", "regular"])
+        self.assertEqual(len(specs[0]["automation"]["triggers"]), 1)
+        self.assertEqual(specs[0]["automation"]["triggers"][0]["trigger"], "delay")
+        self.assertEqual(len(specs[1]["automation"]["triggers"]), 1)
+        self.assertEqual(specs[1]["automation"]["triggers"][0]["trigger"], "state")
+        self.assertEqual(specs[0]["automation"]["actions"], automation["actions"])
+        self.assertEqual(specs[1]["automation"]["actions"], automation["actions"])
+
+    def test_split_multiple_one_shot_triggers(self) -> None:
+        automation = {
+            "triggers": [
+                {"trigger": "delay", "duration": {"minutes": 3}},
+                {"trigger": "time", "date": "2026-06-04", "at": "08:00:00"},
+            ],
+            "actions": [{"action": "script.turn_on"}],
+        }
+
+        specs, errors = ia._split_automation_specs(automation)
+
+        self.assertEqual(errors, [])
+        self.assertEqual([spec["type"] for spec in specs], ["one_shot", "one_shot"])
+        self.assertEqual(len(specs[0]["automation"]["triggers"]), 1)
+        self.assertEqual(len(specs[1]["automation"]["triggers"]), 1)
+
+    def test_split_rejects_trigger_conditions_when_multiple_specs_needed(self) -> None:
+        automation = {
+            "triggers": [
+                {"trigger": "delay", "duration": {"minutes": 3}},
+                {"trigger": "state", "entity_id": "binary_sensor.door", "to": "on"},
+            ],
+            "conditions": {"condition": "trigger", "id": "door"},
+            "actions": [{"action": "script.turn_on"}],
+        }
+
+        specs, errors = ia._split_automation_specs(automation)
+
+        self.assertEqual(specs, [])
+        self.assertIn("trigger conditions", " ".join(errors))
+
+    def test_split_rejects_invalid_trigger_shapes(self) -> None:
+        cases = [
+            (
+                {
+                    "triggers": [
+                        {"trigger": "delay", "duration": {"minutes": 3}},
+                        "bad",
+                    ]
+                },
+                "items must be objects",
+            ),
+            ({"trigger": "bad"}, "must be a list or object"),
+        ]
+        for automation, expected_error in cases:
+            with self.subTest(automation=automation):
+                specs, errors = ia._split_automation_specs(automation)
+
+                self.assertEqual(specs, [])
+                self.assertIn(expected_error, " ".join(errors))
+
+    def test_internal_cleanup_action_is_appended_only_by_internal_flow(self) -> None:
+        automation = {
+            "triggers": [
+                {"trigger": "time", "date": "2026-06-04", "at": "08:00:00"}
+            ],
+            "actions": [{"action": "script.turn_on"}],
+        }
+        frozen_now = datetime(2026, 6, 3, 9, 0, 0, tzinfo=LOCAL_TZ)
+
+        with (
+            patch.object(ia.dt_util, "now", return_value=frozen_now),
+            patch.object(ia.dt_util, "get_default_time_zone", return_value=LOCAL_TZ),
+        ):
+            config, errors = asyncio.run(
+                ia._automation_config_from_internal_plan(
+                    _FakeIntent(),
+                    "houzzkit_ai_test",
+                    automation,
+                    append_one_shot_cleanup=True,
+                )
+            )
+
+        self.assertEqual(errors, [])
+        cleanup = config["actions"][-1]
+        self.assertEqual(cleanup["action"], "houzzkit_ai.delete_one_shot_automation")
+        self.assertEqual(cleanup["data"]["id"], "houzzkit_ai_test")
+        self.assertEqual(cleanup["data"]["marker"], "houzzkit_ai_one_shot")
+
+    def test_user_cleanup_action_is_rejected(self) -> None:
+        errors: list[str] = []
+
+        result = asyncio.run(
+            ia._convert_action_with_resolved_targets(
+                _FakeIntent(),
+                {"action": "houzzkit_ai.delete_one_shot_automation"},
+                errors,
+                path="automation.actions[0]",
+            )
+        )
+
+        self.assertEqual(result, [])
+        self.assertIn("internal", " ".join(errors))
+
+    def test_cleanup_marker_must_match_generated_action(self) -> None:
+        automation = {
+            "id": "houzzkit_ai_test",
+            "actions": [
+                {
+                    "action": "houzzkit_ai.delete_one_shot_automation",
+                    "data": {
+                        "id": "houzzkit_ai_test",
+                        "marker": "houzzkit_ai_one_shot",
+                    },
+                }
+            ],
+        }
+
+        self.assertTrue(
+            ia._has_internal_one_shot_cleanup_action(automation, "houzzkit_ai_test")
+        )
+        self.assertFalse(
+            ia._has_internal_one_shot_cleanup_action(automation, "houzzkit_ai_other")
+        )
+
+    def test_delete_one_shot_service_registers_callback_handler(self) -> None:
+        hass = _FakeSetupHass()
+
+        ia.async_setup_automation_services(hass)
+
+        self.assertEqual(len(hass.services.registered), 1)
+        domain, service, service_func, _schema = hass.services.registered[0]
+        self.assertEqual(domain, "houzzkit_ai")
+        self.assertEqual(service, "delete_one_shot_automation")
+        self.assertIs(service_func.func, ia._handle_delete_one_shot_service)
+        self.assertIs(service_func.args[0], hass)
+        self.assertTrue(getattr(service_func.func, "_hass_callback", False))
+
+    def test_delete_one_shot_handler_schedules_cleanup_task(self) -> None:
+        calls: list[tuple[object, str, str]] = []
+
+        async def fake_delete(
+            hass: object,
+            automation_id: str,
+            marker: str,
+        ) -> None:
+            calls.append((hass, automation_id, marker))
+
+        hass = _FakeTaskHass()
+        call = types.SimpleNamespace(
+            data={
+                "id": "houzzkit_ai_test",
+                "marker": "houzzkit_ai_one_shot",
+            }
+        )
+
+        with patch.object(ia, "_async_delete_one_shot_automation", fake_delete):
+            ia._handle_delete_one_shot_service(hass, call)
+
+        self.assertIsNotNone(hass.created_task)
+        asyncio.run(hass.created_task)
+        self.assertEqual(
+            calls,
+            [(hass, "houzzkit_ai_test", "houzzkit_ai_one_shot")],
         )
 
 
