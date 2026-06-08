@@ -90,6 +90,16 @@ _AUTOMATION_SLOT_SCHEMA = {
     vol.Required("automation"): dict,
     vol.Optional("_speaker_id"): str,
 }
+_LIST_MANAGED_AUTOMATIONS_SLOT_SCHEMA = {
+    vol.Optional("query"): str,
+    vol.Optional("limit"): int,
+    vol.Optional("cursor"): str,
+    vol.Optional("_speaker_id"): str,
+}
+_DELETE_AUTOMATION_SLOT_SCHEMA = {
+    vol.Required(CONF_ID): str,
+    vol.Optional("_speaker_id"): str,
+}
 _ONE_SHOT_AUTOMATION_TYPE = "one_shot"
 _REGULAR_AUTOMATION_TYPE = "regular"
 
@@ -174,6 +184,56 @@ class HouzzkitCreateAutomationIntent(intent.IntentHandler):
         slots = self.async_validate_slots(intent_obj.slots)
         automation = slots["automation"]["value"]
         return await _create_automation(intent_obj, automation)
+
+
+class HouzzkitListManagedAutomationsIntent(intent.IntentHandler):
+    """List Houzzkit-created automation summaries for management flows."""
+
+    intent_type = "HouzzkitListManagedAutomations"
+    description = "List Houzzkit AI managed automation summaries."
+
+    @property
+    def slot_schema(self) -> dict | None:
+        """Return a slot schema."""
+        return _LIST_MANAGED_AUTOMATIONS_SLOT_SCHEMA
+
+    async def async_handle(  # type: ignore[override]
+        self,
+        intent_obj: intent.Intent,
+    ) -> JsonObjectType:
+        """List managed automation candidates."""
+        slots = self.async_validate_slots(intent_obj.slots)
+        query = str(_slot_value(slots, "query", "") or "")
+        limit = _safe_limit(_slot_value(slots, "limit", 5))
+        cursor = _slot_value(slots, "cursor", None)
+        cursor_value = cursor if isinstance(cursor, str) else None
+        return await _list_managed_automations(
+            intent_obj.hass,
+            query=query,
+            limit=limit,
+            cursor=cursor_value,
+        )
+
+
+class HouzzkitDeleteAutomationIntent(intent.IntentHandler):
+    """Delete one Houzzkit-created automation and reload automations."""
+
+    intent_type = "HouzzkitDeleteAutomation"
+    description = "Delete one Houzzkit AI managed automation by id."
+
+    @property
+    def slot_schema(self) -> dict | None:
+        """Return a slot schema."""
+        return _DELETE_AUTOMATION_SLOT_SCHEMA
+
+    async def async_handle(  # type: ignore[override]
+        self,
+        intent_obj: intent.Intent,
+    ) -> JsonObjectType:
+        """Delete a managed automation config."""
+        slots = self.async_validate_slots(intent_obj.slots)
+        automation_id = str(slots[CONF_ID]["value"])
+        return await _delete_managed_automation(intent_obj.hass, automation_id)
 
 
 def async_setup_automation_services(hass: HomeAssistant) -> None:
@@ -351,6 +411,85 @@ async def _read_automation_summaries(hass: HomeAssistant) -> list[dict[str, Any]
             summary["description"] = description
         summaries.append(summary)
     return summaries
+
+
+async def _list_managed_automations(
+    hass: HomeAssistant,
+    *,
+    query: str = "",
+    limit: int = 5,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    configs = await _read_automation_configs(hass)
+    normalized_query = query.strip().casefold()
+    managed: list[dict[str, Any]] = []
+    for item in configs:
+        automation_id = item.get(CONF_ID)
+        if not isinstance(automation_id, str) or not _is_houzzkit_automation_id(automation_id):
+            continue
+        alias = _automation_alias_for_user(item)
+        summary = _automation_summary_for_user(item, alias)
+        searchable = f"{alias} {summary}".casefold()
+        if normalized_query and normalized_query not in searchable:
+            continue
+        managed.append(
+            {
+                CONF_ID: automation_id,
+                CONF_ALIAS: alias,
+                "summary": summary,
+            }
+        )
+
+    start = _safe_cursor_offset(cursor)
+    end = start + limit
+    page = managed[start:end]
+    return {
+        "success": True,
+        "automations": page,
+        "total_count": len(managed),
+        "next_cursor": str(end) if end < len(managed) else None,
+    }
+
+
+async def _delete_managed_automation(
+    hass: HomeAssistant,
+    automation_id: str,
+) -> dict[str, Any]:
+    if not isinstance(automation_id, str) or not _is_houzzkit_automation_id(automation_id):
+        return {
+            "success": False,
+            "error": "Only Houzzkit AI managed automations can be deleted",
+        }
+
+    async with _AUTOMATION_WRITE_LOCK:
+        configs = await _read_automation_configs(hass)
+        removed: dict[str, Any] | None = None
+        remaining: list[dict[str, Any]] = []
+        for item in configs:
+            if item.get(CONF_ID) == automation_id:
+                removed = item
+                continue
+            remaining.append(item)
+
+        if removed is None:
+            return {"success": False, "error": "Automation not found"}
+
+        await _write_automation_configs(hass, remaining)
+
+    await hass.services.async_call(
+        AUTOMATION_DOMAIN,
+        SERVICE_RELOAD,
+        {},
+        blocking=True,
+    )
+    alias = _automation_alias_for_user(removed)
+    return {
+        "success": True,
+        "deleted_automation": {
+            CONF_ALIAS: alias,
+            "summary": _automation_summary_for_user(removed, alias),
+        },
+    }
 
 
 async def _validate_automation(
@@ -1538,3 +1677,50 @@ def _has_alias_duplicate(configs: list[dict[str, Any]], alias: str) -> bool:
         if str(item.get(CONF_ALIAS, "")).strip().casefold() == normalized
     )
     return count > 1
+
+
+def _slot_value(slots: dict[str, Any], key: str, default: Any) -> Any:
+    slot = slots.get(key)
+    if isinstance(slot, dict) and "value" in slot:
+        return slot["value"]
+    return default
+
+
+def _safe_limit(value: Any) -> int:
+    if not isinstance(value, int):
+        return 5
+    return max(1, min(value, 20))
+
+
+def _safe_cursor_offset(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return 0
+
+
+def _automation_alias_for_user(automation: dict[str, Any]) -> str:
+    alias = automation.get(CONF_ALIAS)
+    if isinstance(alias, str) and alias.strip():
+        return _normalize_user_summary(alias)
+    return "未命名自动化"
+
+
+def _automation_summary_for_user(
+    automation: dict[str, Any],
+    alias: str,
+) -> str:
+    # 管理类 intent 的用户摘要只使用安全展示字段，避免泄露实体 id、服务名或内部配置。
+    for key in ("summary", "description"):
+        value = automation.get(key)
+        if isinstance(value, str) and value.strip():
+            return _normalize_user_summary(value)
+    return alias
+
+
+def _normalize_user_summary(value: str) -> str:
+    summary = re.sub(r"\s+", " ", value.strip())
+    summary = summary.rstrip("。.!！?？；;，,")
+    return summary or "未命名自动化"

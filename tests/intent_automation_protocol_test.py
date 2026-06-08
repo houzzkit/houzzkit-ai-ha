@@ -80,8 +80,21 @@ def _convert_triggers(
 
 
 class _FakeServices:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict, bool | None]] = []
+
     def async_services(self) -> dict[str, dict[str, dict]]:
         return {"script": {"turn_on": {}}}
+
+    async def async_call(
+        self,
+        domain: str,
+        service: str,
+        data: dict,
+        *,
+        blocking: bool | None = None,
+    ) -> None:
+        self.calls.append((domain, service, data, blocking))
 
 
 class _FakeHass:
@@ -145,6 +158,136 @@ class AutomationProtocolTest(unittest.TestCase):
             ["time_trigger_date", "time_trigger_delay"],
         )
         self.assertEqual(result["current_date"], "2026-06-03")
+
+    def test_list_managed_automations_returns_only_houzzkit_items(self) -> None:
+        async def fake_configs(hass: object) -> list[dict[str, str]]:
+            return [
+                {
+                    "id": "houzzkit_ai_morning",
+                    "alias": "早上提醒",
+                    "description": "每天早上 8 点提醒你",
+                },
+                {
+                    "id": "manual_automation",
+                    "alias": "手工自动化",
+                    "description": "不应返回",
+                },
+                {
+                    "id": "houzzkit_ai_water",
+                    "alias": "厨房漏水提醒",
+                    "summary": "检测到漏水时发出警告播报",
+                },
+            ]
+
+        with patch.object(ia, "_read_automation_configs", fake_configs):
+            result = asyncio.run(
+                ia._list_managed_automations(
+                    _FakeHass(),
+                    query="提醒",
+                    limit=1,
+                    cursor=None,
+                )
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_count"], 2)
+        self.assertEqual(result["next_cursor"], "1")
+        self.assertEqual(
+            result["automations"],
+            [
+                {
+                    "id": "houzzkit_ai_morning",
+                    "alias": "早上提醒",
+                    "summary": "每天早上 8 点提醒你",
+                }
+            ],
+        )
+
+    def test_list_managed_automations_paginates_with_stable_cursor(self) -> None:
+        async def fake_configs(hass: object) -> list[dict[str, str]]:
+            return [
+                {
+                    "id": f"houzzkit_ai_{index:02d}",
+                    "alias": f"自动化 {index}",
+                    "description": f"第 {index} 条自动化",
+                }
+                for index in range(1, 26)
+            ]
+
+        with patch.object(ia, "_read_automation_configs", fake_configs):
+            first_page = asyncio.run(
+                ia._list_managed_automations(
+                    _FakeHass(),
+                    query="",
+                    limit=20,
+                    cursor=None,
+                )
+            )
+            second_page = asyncio.run(
+                ia._list_managed_automations(
+                    _FakeHass(),
+                    query="",
+                    limit=20,
+                    cursor="20",
+                )
+            )
+
+        self.assertTrue(first_page["success"])
+        self.assertEqual(first_page["total_count"], 25)
+        self.assertEqual(len(first_page["automations"]), 20)
+        self.assertEqual(first_page["next_cursor"], "20")
+        self.assertTrue(second_page["success"])
+        self.assertEqual(len(second_page["automations"]), 5)
+        self.assertEqual(second_page["automations"][0]["id"], "houzzkit_ai_21")
+        self.assertIsNone(second_page["next_cursor"])
+
+    def test_delete_managed_automation_rejects_non_houzzkit_id(self) -> None:
+        async def fake_write(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("write must not be called")
+
+        with patch.object(ia, "_write_automation_configs", fake_write):
+            result = asyncio.run(
+                ia._delete_managed_automation(_FakeHass(), "manual_automation")
+            )
+
+        self.assertFalse(result["success"])
+        self.assertIn("Houzzkit", result["error"])
+
+    def test_delete_managed_automation_writes_remaining_and_reloads(self) -> None:
+        written: list[list[dict[str, str]]] = []
+
+        async def fake_configs(hass: object) -> list[dict[str, str]]:
+            return [
+                {
+                    "id": "houzzkit_ai_delete",
+                    "alias": "早上提醒",
+                    "description": "每天早上 8 点提醒你",
+                },
+                {
+                    "id": "houzzkit_ai_keep",
+                    "alias": "保留提醒",
+                },
+            ]
+
+        async def fake_write(hass: object, configs: list[dict[str, str]]) -> None:
+            written.append(configs)
+
+        hass = types.SimpleNamespace(services=_FakeServices())
+        with (
+            patch.object(ia, "_read_automation_configs", fake_configs),
+            patch.object(ia, "_write_automation_configs", fake_write),
+        ):
+            result = asyncio.run(
+                ia._delete_managed_automation(hass, "houzzkit_ai_delete")
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["deleted_automation"]["alias"], "早上提醒")
+        self.assertEqual(written, [[{"id": "houzzkit_ai_keep", "alias": "保留提醒"}]])
+        self.assertEqual(
+            hass.services.calls,
+            [("automation", "reload", {}, True)],
+        )
 
     def test_time_date_trigger_becomes_time_trigger_with_date_guard(self) -> None:
         automation = {
