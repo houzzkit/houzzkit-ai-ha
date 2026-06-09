@@ -6,6 +6,7 @@ import asyncio
 from copy import deepcopy
 from datetime import date, datetime, time, timedelta
 from functools import partial
+import json
 import logging
 import os
 import re
@@ -39,6 +40,7 @@ from homeassistant.const import (
     CONF_MODE,
     CONF_PLATFORM,
     CONF_TRIGGERS,
+    CONF_VARIABLES,
     CONF_VALUE_TEMPLATE,
     CONF_WEEKDAY,
     SERVICE_CLOSE_COVER,
@@ -60,6 +62,7 @@ from homeassistant.util.file import write_utf8_file_atomic
 from homeassistant.util.json import JsonObjectType
 from homeassistant.util.yaml import dump, load_yaml
 
+from .automation_capabilities import SUPPORTED_PLAN_FEATURES
 from .const import DOMAIN
 from .houzzkit import get_entities
 from .intent_helper import EntityInfo, match_intent_entities
@@ -79,21 +82,28 @@ _DELETE_ONE_SHOT_ACTION = f"{DOMAIN}.{_DELETE_ONE_SHOT_SERVICE}"
 _ONE_SHOT_CLEANUP_MARKER = "houzzkit_ai_one_shot"
 _VOICE_TEXT_HINTS = ("播放语音", "bo_fang_yu_yin")
 _RESOLVED_TARGETS_FIELD = "resolved_targets"
-_SUPPORTED_PLAN_FEATURES = ["time_trigger_date", "time_trigger_delay"]
+_SUPPORTED_PLAN_FEATURES = SUPPORTED_PLAN_FEATURES
 _CURRENT_DATE_FIELD = "current_date"
 _DELAY_DURATION_FIELDS = {"days", "hours", "minutes", "seconds"}
 _DELAY_TRIGGER_CONFLICT_FIELDS = {CONF_AT, "date", CONF_WEEKDAY}
 _LOCAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _LOCAL_TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 _ONE_SHOT_TRIGGER_ID_PREFIX = "houzzkit_ai_once_"
+_MANAGED_KIND_AUTOMATION = "automation"
+_MANAGED_KIND_REMINDER = "reminder"
+_MANAGED_KINDS = [_MANAGED_KIND_AUTOMATION, _MANAGED_KIND_REMINDER]
+_MANAGED_KIND_VARIABLE = "houzzkit_ai_managed_kind"
+_REMINDER_METADATA_VARIABLE = "houzzkit_ai_reminder"
 _AUTOMATION_SLOT_SCHEMA = {
     vol.Required("automation"): dict,
+    vol.Optional("managed_kind"): vol.In(_MANAGED_KINDS),
     vol.Optional("_speaker_id"): str,
 }
 _LIST_MANAGED_AUTOMATIONS_SLOT_SCHEMA = {
     vol.Optional("query"): str,
     vol.Optional("limit"): int,
     vol.Optional("cursor"): str,
+    vol.Optional("kind"): vol.In(_MANAGED_KINDS),
     vol.Optional("_speaker_id"): str,
 }
 _DELETE_AUTOMATION_SLOT_SCHEMA = {
@@ -183,7 +193,14 @@ class HouzzkitCreateAutomationIntent(intent.IntentHandler):
         """Create automation config."""
         slots = self.async_validate_slots(intent_obj.slots)
         automation = slots["automation"]["value"]
-        return await _create_automation(intent_obj, automation)
+        managed_kind = str(
+            _slot_value(slots, "managed_kind", _MANAGED_KIND_AUTOMATION)
+        )
+        return await _create_automation(
+            intent_obj,
+            automation,
+            managed_kind=managed_kind,
+        )
 
 
 class HouzzkitListManagedAutomationsIntent(intent.IntentHandler):
@@ -204,14 +221,18 @@ class HouzzkitListManagedAutomationsIntent(intent.IntentHandler):
         """List managed automation candidates."""
         slots = self.async_validate_slots(intent_obj.slots)
         query = str(_slot_value(slots, "query", "") or "")
-        limit = _safe_limit(_slot_value(slots, "limit", 5))
+        raw_limit = _slot_value(slots, "limit", None)
+        limit = _safe_limit(raw_limit) if raw_limit is not None else None
         cursor = _slot_value(slots, "cursor", None)
         cursor_value = cursor if isinstance(cursor, str) else None
+        kind = _slot_value(slots, "kind", None)
+        kind_value = kind if isinstance(kind, str) else None
         return await _list_managed_automations(
             intent_obj.hass,
             query=query,
             limit=limit,
             cursor=cursor_value,
+            kind=kind_value,
         )
 
 
@@ -417,17 +438,42 @@ async def _list_managed_automations(
     hass: HomeAssistant,
     *,
     query: str = "",
-    limit: int = 5,
+    limit: int | None = None,
     cursor: str | None = None,
+    kind: str | None = None,
 ) -> dict[str, Any]:
     configs = await _read_automation_configs(hass)
     normalized_query = query.strip().casefold()
+    target_kind = _normalize_managed_kind(kind)
     managed: list[dict[str, Any]] = []
     for item in configs:
         automation_id = item.get(CONF_ID)
-        if not isinstance(automation_id, str) or not _is_houzzkit_automation_id(automation_id):
+        if not isinstance(automation_id, str) or not _is_houzzkit_automation_id(
+            automation_id
+        ):
+            continue
+        managed_kind = _managed_kind_for_automation(item)
+        if target_kind is not None and managed_kind != target_kind:
             continue
         alias = _automation_alias_for_user(item)
+        if managed_kind == _MANAGED_KIND_REMINDER:
+            reminder_item, reminder_errors = _reminder_public_item(
+                item,
+                automation_id,
+                alias,
+            )
+            if reminder_errors:
+                return {
+                    "success": False,
+                    "error": "Reminder metadata is missing or invalid",
+                    "errors": reminder_errors,
+                }
+            searchable = _reminder_searchable_text(reminder_item).casefold()
+            if normalized_query and normalized_query not in searchable:
+                continue
+            managed.append(reminder_item)
+            continue
+
         summary = _automation_summary_for_user(item, alias)
         searchable = f"{alias} {summary}".casefold()
         if normalized_query and normalized_query not in searchable:
@@ -436,18 +482,26 @@ async def _list_managed_automations(
             {
                 CONF_ID: automation_id,
                 CONF_ALIAS: alias,
+                "managed_kind": managed_kind,
                 "summary": summary,
+                "trigger_summary": _automation_trigger_summary_for_user(item),
+                "action_summary": _automation_action_summary_for_user(item),
             }
         )
 
     start = _safe_cursor_offset(cursor)
-    end = start + limit
-    page = managed[start:end]
+    if limit is None:
+        page = managed[start:]
+        next_cursor = None
+    else:
+        end = start + limit
+        page = managed[start:end]
+        next_cursor = str(end) if end < len(managed) else None
     return {
         "success": True,
         "automations": page,
         "total_count": len(managed),
-        "next_cursor": str(end) if end < len(managed) else None,
+        "next_cursor": next_cursor,
     }
 
 
@@ -543,9 +597,17 @@ async def _validate_automation(
 async def _create_automation(
     intent_obj: intent.Intent,
     automation: dict[str, Any],
+    *,
+    managed_kind: str = _MANAGED_KIND_AUTOMATION,
 ) -> dict[str, Any]:
     if not isinstance(automation, dict):
         return {"success": False, "errors": ["automation must be an object"]}
+    normalized_managed_kind = _normalize_managed_kind(managed_kind)
+    if normalized_managed_kind is None:
+        return {
+            "success": False,
+            "errors": ["managed_kind must be automation or reminder"],
+        }
 
     async with _AUTOMATION_WRITE_LOCK:
         hass = intent_obj.hass
@@ -583,6 +645,7 @@ async def _create_automation(
                 automation_id,
                 spec["automation"],
                 append_one_shot_cleanup=spec["type"] == _ONE_SHOT_AUTOMATION_TYPE,
+                managed_kind=normalized_managed_kind,
             )
             errors.extend(config_errors)
             if config:
@@ -624,6 +687,7 @@ async def _create_automation(
                     CONF_ID: item[CONF_ID],
                     CONF_ALIAS: item[CONF_ALIAS],
                     "type": item["type"],
+                    "managed_kind": normalized_managed_kind,
                 }
                 for item in prepared
             ],
@@ -636,6 +700,7 @@ async def _create_automation(
         "success": True,
         "id": automation_id,
         "alias": alias,
+        "managed_kind": normalized_managed_kind,
     }
     if entity_id := _find_automation_entity_id(hass, automation_id):
         result["entity_id"] = entity_id
@@ -650,10 +715,17 @@ async def _automation_config_from_internal_plan(
     automation: dict[str, Any],
     *,
     append_one_shot_cleanup: bool = False,
+    managed_kind: str = _MANAGED_KIND_AUTOMATION,
 ) -> tuple[dict[str, Any], list[str]]:
     errors = _raw_target_errors(automation)
     if errors:
         return {}, errors
+
+    reminder_metadata: dict[str, Any] | None = None
+    if managed_kind == _MANAGED_KIND_REMINDER:
+        reminder_metadata = _reminder_metadata_from_internal_plan(automation, errors)
+        if errors:
+            return {}, errors
 
     converted = deepcopy(automation)
     _convert_plan_time_triggers(converted, errors)
@@ -703,7 +775,12 @@ async def _automation_config_from_internal_plan(
     if append_one_shot_cleanup:
         _append_one_shot_cleanup_action(converted, automation_id)
 
-    return _automation_config_for_write(automation_id, converted), []
+    return _automation_config_for_write(
+        automation_id,
+        converted,
+        managed_kind=managed_kind,
+        reminder_metadata=reminder_metadata,
+    ), []
 
 
 def _split_automation_specs(
@@ -1599,6 +1676,9 @@ def _service_for_operation(
 def _automation_config_for_write(
     automation_id: str,
     automation: dict[str, Any],
+    *,
+    managed_kind: str = _MANAGED_KIND_AUTOMATION,
+    reminder_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """使用稳定字段顺序写入 HA automation，id 总是由工具侧生成。"""
     config: dict[str, Any] = {CONF_ID: automation_id}
@@ -1618,6 +1698,11 @@ def _automation_config_for_write(
     for key, value in automation.items():
         if key != CONF_ID and key not in config:
             config[key] = value
+    config[CONF_VARIABLES] = _variables_with_managed_kind(
+        config.get(CONF_VARIABLES),
+        managed_kind,
+        reminder_metadata=reminder_metadata,
+    )
     config.setdefault(CONF_MODE, "single")
     return config
 
@@ -1701,6 +1786,257 @@ def _safe_cursor_offset(value: str | None) -> int:
         return 0
 
 
+def _normalize_managed_kind(value: Any) -> str | None:
+    if value in _MANAGED_KINDS:
+        return str(value)
+    return None
+
+
+def _managed_kind_for_automation(automation: dict[str, Any]) -> str:
+    variables = automation.get(CONF_VARIABLES)
+    if isinstance(variables, dict):
+        kind = _normalize_managed_kind(variables.get(_MANAGED_KIND_VARIABLE))
+        if kind is not None:
+            return kind
+    # 历史 Houzzkit 自建项没有内部分类变量，按旧设备自动化管理。
+    return _MANAGED_KIND_AUTOMATION
+
+
+def _variables_with_managed_kind(
+    value: Any,
+    managed_kind: str,
+    *,
+    reminder_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    variables = deepcopy(value) if isinstance(value, dict) else {}
+    variables[_MANAGED_KIND_VARIABLE] = managed_kind
+    if managed_kind == _MANAGED_KIND_REMINDER:
+        if reminder_metadata is not None:
+            variables[_REMINDER_METADATA_VARIABLE] = deepcopy(reminder_metadata)
+        else:
+            variables.pop(_REMINDER_METADATA_VARIABLE, None)
+    else:
+        variables.pop(_REMINDER_METADATA_VARIABLE, None)
+    return variables
+
+
+def _reminder_metadata_from_internal_plan(
+    automation: dict[str, Any],
+    errors: list[str],
+) -> dict[str, Any] | None:
+    triggers = _normalized_trigger_items(automation, errors)
+    actions = _normalized_action_items(automation, errors)
+    if len(triggers) != 1:
+        errors.append("reminder automation must contain exactly one trigger")
+        return None
+    if len(actions) != 1:
+        errors.append("reminder automation must contain exactly one action")
+        return None
+
+    schedule = _reminder_schedule_from_plan_trigger(
+        triggers[0],
+        errors,
+        path="automation.triggers[0]",
+    )
+    message = _reminder_message_from_plan_action(
+        actions[0],
+        errors,
+        path="automation.actions[0]",
+    )
+    if schedule is None or message is None:
+        return None
+    return {"schedule": schedule, "message": message}
+
+
+def _reminder_schedule_from_plan_trigger(
+    trigger: dict[str, Any],
+    errors: list[str],
+    *,
+    path: str,
+) -> dict[str, Any] | None:
+    trigger_type = trigger.get("trigger") or trigger.get(CONF_PLATFORM)
+    if trigger_type == "time":
+        schedule: dict[str, Any] = {"type": "time", CONF_AT: trigger.get(CONF_AT)}
+        if "date" in trigger:
+            schedule["date"] = trigger.get("date")
+        if CONF_WEEKDAY in trigger:
+            schedule[CONF_WEEKDAY] = deepcopy(trigger.get(CONF_WEEKDAY))
+        return _normalize_reminder_schedule(schedule, errors, path=path)
+    if trigger_type == "delay":
+        schedule = {
+            "type": "delay",
+            "duration": deepcopy(trigger.get("duration")),
+        }
+        return _normalize_reminder_schedule(schedule, errors, path=path)
+    errors.append(f"{path}.trigger must be time or delay for reminder")
+    return None
+
+
+def _reminder_message_from_plan_action(
+    action: dict[str, Any],
+    errors: list[str],
+    *,
+    path: str,
+) -> str | None:
+    action_name = action.get("action") or action.get("service")
+    if action_name != _HOUZZKIT_NOTIFY_ACTION:
+        errors.append(f"{path}.action must be {_HOUZZKIT_NOTIFY_ACTION} for reminder")
+        return None
+    data = action.get("data")
+    if not isinstance(data, dict):
+        errors.append(f"{path}.data must be an object")
+        return None
+    message = data.get("message")
+    if not isinstance(message, str) or not message.strip():
+        errors.append(f"{path}.data.message must be a non-empty string")
+        return None
+    return message.strip()
+
+
+def _reminder_public_item(
+    automation: dict[str, Any],
+    automation_id: str,
+    alias: str,
+) -> tuple[dict[str, Any], list[str]]:
+    variables = automation.get(CONF_VARIABLES)
+    metadata = (
+        variables.get(_REMINDER_METADATA_VARIABLE)
+        if isinstance(variables, dict)
+        else None
+    )
+    errors: list[str] = []
+    if not isinstance(metadata, dict):
+        return {}, [f"{automation_id}: reminder metadata is required"]
+
+    schedule = _normalize_reminder_schedule(
+        metadata.get("schedule"),
+        errors,
+        path=f"{automation_id}.schedule",
+    )
+    message = metadata.get("message")
+    if not isinstance(message, str) or not message.strip():
+        errors.append(f"{automation_id}.message must be a non-empty string")
+    if schedule is None or errors:
+        return {}, errors
+
+    return {
+        CONF_ID: automation_id,
+        CONF_ALIAS: alias,
+        "managed_kind": _MANAGED_KIND_REMINDER,
+        "summary": alias,
+        "schedule": schedule,
+        "message": message.strip(),
+    }, []
+
+
+def _normalize_reminder_schedule(
+    value: Any,
+    errors: list[str],
+    *,
+    path: str,
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        errors.append(f"{path} must be an object")
+        return None
+    schedule_type = value.get("type")
+    if schedule_type == "time":
+        return _normalize_time_reminder_schedule(value, errors, path=path)
+    if schedule_type == "delay":
+        return _normalize_delay_reminder_schedule(value, errors, path=path)
+    errors.append(f"{path}.type must be time or delay")
+    return None
+
+
+def _normalize_time_reminder_schedule(
+    value: dict[str, Any],
+    errors: list[str],
+    *,
+    path: str,
+) -> dict[str, Any] | None:
+    extra_keys = set(value) - {"type", CONF_AT, "date", CONF_WEEKDAY}
+    if extra_keys:
+        errors.append(f"{path} contains unsupported keys: {sorted(extra_keys)}")
+    at = value.get(CONF_AT)
+    if not isinstance(at, str) or not _LOCAL_TIME_RE.fullmatch(at):
+        errors.append(f"{path}.at must use HH:MM:SS")
+        return None
+    schedule: dict[str, Any] = {"type": "time", CONF_AT: at}
+
+    reminder_date = value.get("date")
+    if reminder_date is not None:
+        if not isinstance(reminder_date, str) or not _LOCAL_DATE_RE.fullmatch(
+            reminder_date
+        ):
+            errors.append(f"{path}.date must use YYYY-MM-DD")
+        else:
+            schedule["date"] = reminder_date
+
+    weekday = value.get(CONF_WEEKDAY)
+    if weekday is not None:
+        if not isinstance(weekday, list) or not weekday:
+            errors.append(f"{path}.weekday must be a non-empty list")
+        elif not all(isinstance(item, str) and item for item in weekday):
+            errors.append(f"{path}.weekday values must be non-empty strings")
+        else:
+            schedule[CONF_WEEKDAY] = list(weekday)
+
+    if "date" in schedule and CONF_WEEKDAY in schedule:
+        errors.append(f"{path}.date cannot be used with weekday")
+    return schedule if not errors else None
+
+
+def _normalize_delay_reminder_schedule(
+    value: dict[str, Any],
+    errors: list[str],
+    *,
+    path: str,
+) -> dict[str, Any] | None:
+    extra_keys = set(value) - {"type", "duration"}
+    if extra_keys:
+        errors.append(f"{path} contains unsupported keys: {sorted(extra_keys)}")
+    duration = value.get("duration")
+    if not isinstance(duration, dict):
+        errors.append(f"{path}.duration must be an object")
+        return None
+    normalized_duration: dict[str, int] = {}
+    has_positive = False
+    for key in ("days", "hours", "minutes", "seconds"):
+        raw_value = duration.get(key, 0)
+        if not isinstance(raw_value, int) or raw_value < 0:
+            errors.append(f"{path}.duration.{key} must be a non-negative integer")
+            continue
+        normalized_duration[key] = raw_value
+        if raw_value > 0:
+            has_positive = True
+    extra_duration_keys = set(duration) - _DELAY_DURATION_FIELDS
+    if extra_duration_keys:
+        errors.append(
+            f"{path}.duration contains unsupported keys: {sorted(extra_duration_keys)}"
+        )
+    if not has_positive:
+        errors.append(f"{path}.duration must include at least one positive value")
+    if errors:
+        return None
+    return {"type": "delay", "duration": normalized_duration}
+
+
+def _reminder_searchable_text(item: dict[str, Any]) -> str:
+    schedule = item.get("schedule")
+    parts = [str(item.get(CONF_ALIAS, "")), str(item.get("message", ""))]
+    if isinstance(schedule, dict):
+        for key in ("type", "date", CONF_AT):
+            value = schedule.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+        weekday = schedule.get(CONF_WEEKDAY)
+        if isinstance(weekday, list):
+            parts.extend(str(item) for item in weekday)
+        duration = schedule.get("duration")
+        if isinstance(duration, dict):
+            parts.extend(str(value) for value in duration.values())
+    return " ".join(parts)
+
+
 def _automation_alias_for_user(automation: dict[str, Any]) -> str:
     alias = automation.get(CONF_ALIAS)
     if isinstance(alias, str) and alias.strip():
@@ -1718,6 +2054,39 @@ def _automation_summary_for_user(
         if isinstance(value, str) and value.strip():
             return _normalize_user_summary(value)
     return alias
+
+
+def _automation_trigger_summary_for_user(automation: dict[str, Any]) -> str:
+    return _automation_nodes_summary_for_user(
+        _automation_nodes_for_summary(automation, (CONF_TRIGGERS, "trigger"))
+    )
+
+
+def _automation_action_summary_for_user(automation: dict[str, Any]) -> str:
+    return _automation_nodes_summary_for_user(
+        _automation_nodes_for_summary(automation, (CONF_ACTIONS, "action"))
+    )
+
+
+def _automation_nodes_for_summary(
+    automation: dict[str, Any],
+    keys: tuple[str, str],
+) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    for key in keys:
+        value = automation.get(key)
+        if isinstance(value, list):
+            nodes.extend(deepcopy(item) for item in value if isinstance(item, dict))
+        elif isinstance(value, dict):
+            nodes.append(deepcopy(value))
+    return nodes
+
+
+def _automation_nodes_summary_for_user(nodes: list[dict[str, Any]]) -> str:
+    # 该摘要供 ai-server 构建语义文档，不在 HA 侧做自然语言语义判断。
+    if not nodes:
+        return ""
+    return json.dumps(nodes, ensure_ascii=False, sort_keys=True)
 
 
 def _normalize_user_summary(value: str) -> str:

@@ -11,6 +11,11 @@ from homeassistant.components.mcp_server.server import create_server
 from homeassistant.components.mcp_server.session import Session, SessionManager
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.config_entries import ConfigEntry
+from ..automation_capabilities import (
+    HOUZZKIT_AI_INITIALIZE_METADATA_KEY,
+    MCP_SERVER_VERSION,
+    automation_initialize_metadata,
+)
 from ..const import DOMAIN
 from . import EntryAuthFailedError, get_entry_data
 from .ws_transport import WsTransport
@@ -27,6 +32,25 @@ ATTR_TRANSPORT = "mcp_transport"
 
 # 全局 MCP 连接 ID 计数器
 mcp_transport_id = 0
+
+
+def _attach_houzzkit_ai_initialize_metadata(options, hass: HomeAssistant):
+    """Attach automation runtime metadata to MCP initialize capabilities."""
+    metadata = automation_initialize_metadata(getattr(hass.config, "time_zone", None))
+    if metadata is None:
+        return options
+
+    capabilities = getattr(options, "capabilities", None)
+    if capabilities is None:
+        return options
+
+    existing = getattr(capabilities, "experimental", None)
+    experimental = dict(existing) if isinstance(existing, dict) else {}
+    # ai-server 依赖这里的 IANA 时区归一化“明天”等相对日期。
+    experimental[HOUZZKIT_AI_INITIALIZE_METADATA_KEY] = metadata
+    capabilities.experimental = experimental
+    return options
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry):
     """Set up MCP Server from a config entry."""
@@ -90,8 +114,9 @@ class McpTransport(WsTransport):
                 device_id=None,
             )
             self._mcp_server = await self._create_server(context)
-            self._mcp_server.version = "2.3.0"
+            self._mcp_server.version = MCP_SERVER_VERSION
             options = await self.hass.async_add_executor_job(self._mcp_server.create_initialization_options)
+            _attach_houzzkit_ai_initialize_metadata(options, self.hass)
 
             session_manager = SessionManager()
             async with session_manager.create(Session(self._recv_writer)) as session_id:
