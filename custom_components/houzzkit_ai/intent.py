@@ -7,8 +7,10 @@ from .intent_adjust_attribute import AdjustDeviceAttributeIntent
 from .intent_automation import (
     HouzzkitCreateAutomationIntent,
     HouzzkitDeleteAutomationIntent,
+    HouzzkitGetManagedAutomationIntent,
     HouzzkitListAutomationContextIntent,
     HouzzkitListManagedAutomationsIntent,
+    HouzzkitReplaceAutomationIntent,
     HouzzkitValidateAutomationIntent,
 )
 from .intent_live_context import HouzzkitGetLiveContextIntent
@@ -26,6 +28,8 @@ async def async_setup_intents(hass: HomeAssistant):
     intent.async_register(hass, HouzzkitValidateAutomationIntent())
     intent.async_register(hass, HouzzkitCreateAutomationIntent())
     intent.async_register(hass, HouzzkitListManagedAutomationsIntent())
+    intent.async_register(hass, HouzzkitGetManagedAutomationIntent())
+    intent.async_register(hass, HouzzkitReplaceAutomationIntent())
     intent.async_register(hass, HouzzkitDeleteAutomationIntent())
     intent.async_register(hass, TurnDeviceOnIntent())
     intent.async_register(hass, TurnDeviceOffIntent())

@@ -139,6 +139,20 @@ class _FakeTaskHass:
         return object()
 
 
+def _matched_entity(
+    entity_id: str,
+    domain: str,
+    *,
+    name: str,
+    area_name: str,
+) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        name=name,
+        area_name=area_name,
+        state=types.SimpleNamespace(entity_id=entity_id, domain=domain),
+    )
+
+
 class AutomationProtocolTest(unittest.TestCase):
     def test_list_context_returns_plan_features_and_current_date(self) -> None:
         async def fake_summaries(hass: object) -> list[dict[str, str]]:
@@ -181,14 +195,21 @@ class AutomationProtocolTest(unittest.TestCase):
         # MCP 会把 voluptuous schema 转为 JSON Schema；enum 必须来自 list，
         # 不能用 set/tuple，否则远端工具 schema 校验会失败。
         self.assertIsInstance(ia._MANAGED_KINDS, list)
+        self.assertNotIn("query", ia._LIST_MANAGED_AUTOMATIONS_SLOT_SCHEMA)
+        self.assertNotIn("limit", ia._LIST_MANAGED_AUTOMATIONS_SLOT_SCHEMA)
+        self.assertNotIn("cursor", ia._LIST_MANAGED_AUTOMATIONS_SLOT_SCHEMA)
 
-    def test_list_managed_automations_returns_only_houzzkit_items(self) -> None:
+    def test_list_managed_automations_returns_only_semantic_houzzkit_items(self) -> None:
         async def fake_configs(hass: object) -> list[dict[str, Any]]:
             return [
                 {
                     "id": "houzzkit_ai_morning",
                     "alias": "早上提醒",
                     "description": "每天早上 8 点提醒你",
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "automation",
+                        "houzzkit_ai_semantic_text": "主题: 早上提醒\n动作: 提醒用户\n对象: 用户\n意图: 早上提醒用户",
+                    },
                 },
                 {
                     "id": "manual_automation",
@@ -207,15 +228,11 @@ class AutomationProtocolTest(unittest.TestCase):
             result = asyncio.run(
                 ia._list_managed_automations(
                     _FakeHass(),
-                    query="提醒",
-                    limit=1,
-                    cursor=None,
                 )
             )
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["total_count"], 2)
-        self.assertEqual(result["next_cursor"], "1")
+        self.assertEqual(result["total_count"], 1)
         self.assertEqual(
             result["automations"],
             [
@@ -223,9 +240,7 @@ class AutomationProtocolTest(unittest.TestCase):
                     "id": "houzzkit_ai_morning",
                     "alias": "早上提醒",
                     "managed_kind": "automation",
-                    "summary": "每天早上 8 点提醒你",
-                    "trigger_summary": "",
-                    "action_summary": "",
+                    "semantic_text": "主题: 早上提醒\n动作: 提醒用户\n对象: 用户\n意图: 早上提醒用户",
                 }
             ],
         )
@@ -244,6 +259,7 @@ class AutomationProtocolTest(unittest.TestCase):
                     "summary": "每天 9 点提醒喝水",
                     "variables": {
                         "houzzkit_ai_managed_kind": "reminder",
+                        "houzzkit_ai_semantic_text": "主题: 喝水提醒\n动作: 提醒用户喝水\n对象: 水\n意图: 到时间提醒用户喝水",
                         "houzzkit_ai_reminder": {
                             "schedule": {
                                 "type": "time",
@@ -259,7 +275,10 @@ class AutomationProtocolTest(unittest.TestCase):
                     "summary": "晚上 7 点开灯",
                     "triggers": [{"platform": "time", "at": "19:00:00"}],
                     "actions": [{"action": "light.turn_on"}],
-                    "variables": {"houzzkit_ai_managed_kind": "automation"},
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "automation",
+                        "houzzkit_ai_semantic_text": "主题: 开灯自动化\n触发: 晚上\n动作: 打开灯\n对象: 灯\n意图: 到条件时开灯",
+                    },
                 },
             ]
 
@@ -267,18 +286,12 @@ class AutomationProtocolTest(unittest.TestCase):
             reminder_result = asyncio.run(
                 ia._list_managed_automations(
                     _FakeHass(),
-                    query="",
-                    limit=20,
-                    cursor=None,
                     kind="reminder",
                 )
             )
             automation_result = asyncio.run(
                 ia._list_managed_automations(
                     _FakeHass(),
-                    query="",
-                    limit=20,
-                    cursor=None,
                     kind="automation",
                 )
             )
@@ -291,29 +304,26 @@ class AutomationProtocolTest(unittest.TestCase):
                     "id": "houzzkit_ai_reminder",
                     "alias": "喝水提醒",
                     "managed_kind": "reminder",
-                    "summary": "喝水提醒",
                     "schedule": {
                         "type": "time",
                         "at": "09:00:00",
                     },
                     "message": "喝水",
+                    "semantic_text": "主题: 喝水提醒\n动作: 提醒用户喝水\n对象: 水\n意图: 到时间提醒用户喝水",
                 }
             ],
         )
-        self.assertEqual(automation_result["total_count"], 2)
+        self.assertEqual(automation_result["total_count"], 1)
         self.assertEqual(
-            [item["id"] for item in automation_result["automations"]],
-            ["houzzkit_ai_legacy", "houzzkit_ai_light"],
-        )
-        self.assertTrue(
-            all(
-                item["managed_kind"] == "automation"
-                for item in automation_result["automations"]
-            )
-        )
-        self.assertIn(
-            "light.turn_on",
-            automation_result["automations"][1]["action_summary"],
+            automation_result["automations"],
+            [
+                {
+                    "id": "houzzkit_ai_light",
+                    "alias": "开灯自动化",
+                    "managed_kind": "automation",
+                    "semantic_text": "主题: 开灯自动化\n触发: 晚上\n动作: 打开灯\n对象: 灯\n意图: 到条件时开灯",
+                }
+            ],
         )
 
     def test_list_reminder_requires_metadata(self) -> None:
@@ -322,7 +332,10 @@ class AutomationProtocolTest(unittest.TestCase):
                 {
                     "id": "houzzkit_ai_reminder",
                     "alias": "喝水提醒",
-                    "variables": {"houzzkit_ai_managed_kind": "reminder"},
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "reminder",
+                        "houzzkit_ai_semantic_text": "主题: 喝水提醒\n动作: 提醒用户喝水\n对象: 水\n意图: 到时间提醒用户喝水",
+                    },
                 }
             ]
 
@@ -330,9 +343,6 @@ class AutomationProtocolTest(unittest.TestCase):
             result = asyncio.run(
                 ia._list_managed_automations(
                     _FakeHass(),
-                    query="",
-                    limit=20,
-                    cursor=None,
                     kind="reminder",
                 )
             )
@@ -348,6 +358,7 @@ class AutomationProtocolTest(unittest.TestCase):
                     "alias": "上班提醒",
                     "variables": {
                         "houzzkit_ai_managed_kind": "reminder",
+                        "houzzkit_ai_semantic_text": "主题: 上班提醒\n动作: 提醒用户上班\n对象: 上班\n意图: 到时间提醒用户上班",
                         "houzzkit_ai_reminder": {
                             "schedule": {
                                 "type": "time",
@@ -363,6 +374,7 @@ class AutomationProtocolTest(unittest.TestCase):
                     "alias": "打球提醒",
                     "variables": {
                         "houzzkit_ai_managed_kind": "reminder",
+                        "houzzkit_ai_semantic_text": "主题: 打球提醒\n动作: 提醒用户打球\n对象: 打球\n意图: 到时间提醒用户打球",
                         "houzzkit_ai_reminder": {
                             "schedule": {
                                 "type": "time",
@@ -378,6 +390,7 @@ class AutomationProtocolTest(unittest.TestCase):
                     "alias": "出门提醒",
                     "variables": {
                         "houzzkit_ai_managed_kind": "reminder",
+                        "houzzkit_ai_semantic_text": "主题: 出门提醒\n动作: 提醒用户出门\n对象: 出门\n意图: 延迟后提醒用户出门",
                         "houzzkit_ai_reminder": {
                             "schedule": {
                                 "type": "delay",
@@ -393,9 +406,6 @@ class AutomationProtocolTest(unittest.TestCase):
             result = asyncio.run(
                 ia._list_managed_automations(
                     _FakeHass(),
-                    query="",
-                    limit=20,
-                    cursor=None,
                     kind="reminder",
                 )
             )
@@ -408,31 +418,30 @@ class AutomationProtocolTest(unittest.TestCase):
                     "id": "houzzkit_ai_date",
                     "alias": "上班提醒",
                     "managed_kind": "reminder",
-                    "summary": "上班提醒",
                     "schedule": {
                         "type": "time",
                         "at": "08:00:00",
                         "date": "2026-06-09",
                     },
                     "message": "该上班了",
+                    "semantic_text": "主题: 上班提醒\n动作: 提醒用户上班\n对象: 上班\n意图: 到时间提醒用户上班",
                 },
                 {
                     "id": "houzzkit_ai_weekday",
                     "alias": "打球提醒",
                     "managed_kind": "reminder",
-                    "summary": "打球提醒",
                     "schedule": {
                         "type": "time",
                         "at": "17:00:00",
                         "weekday": ["mon", "wed"],
                     },
                     "message": "该去打球了",
+                    "semantic_text": "主题: 打球提醒\n动作: 提醒用户打球\n对象: 打球\n意图: 到时间提醒用户打球",
                 },
                 {
                     "id": "houzzkit_ai_delay",
                     "alias": "出门提醒",
                     "managed_kind": "reminder",
-                    "summary": "出门提醒",
                     "schedule": {
                         "type": "delay",
                         "duration": {
@@ -443,17 +452,22 @@ class AutomationProtocolTest(unittest.TestCase):
                         },
                     },
                     "message": "该出门了",
+                    "semantic_text": "主题: 出门提醒\n动作: 提醒用户出门\n对象: 出门\n意图: 延迟后提醒用户出门",
                 },
             ],
         )
 
     def test_list_managed_automations_returns_all_without_explicit_limit(self) -> None:
-        async def fake_configs(hass: object) -> list[dict[str, str]]:
+        async def fake_configs(hass: object) -> list[dict[str, Any]]:
             return [
                 {
                     "id": f"houzzkit_ai_{index:02d}",
                     "alias": f"自动化 {index}",
                     "description": f"第 {index} 条自动化",
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "automation",
+                        "houzzkit_ai_semantic_text": f"主题: 自动化 {index}\n动作: 执行动作 {index}\n对象: 对象 {index}\n意图: 管理自动化 {index}",
+                    },
                 }
                 for index in range(1, 26)
             ]
@@ -462,53 +476,108 @@ class AutomationProtocolTest(unittest.TestCase):
             result = asyncio.run(
                 ia._list_managed_automations(
                     _FakeHass(),
-                    query="",
-                    cursor=None,
                 )
             )
 
         self.assertTrue(result["success"])
         self.assertEqual(result["total_count"], 25)
         self.assertEqual(len(result["automations"]), 25)
-        self.assertIsNone(result["next_cursor"])
+        self.assertNotIn("next_cursor", result)
 
-    def test_list_managed_automations_paginates_with_stable_cursor(self) -> None:
-        async def fake_configs(hass: object) -> list[dict[str, str]]:
+    def test_list_managed_automations_filters_by_schedule(self) -> None:
+        async def fake_configs(hass: object) -> list[dict[str, Any]]:
             return [
                 {
-                    "id": f"houzzkit_ai_{index:02d}",
-                    "alias": f"自动化 {index}",
-                    "description": f"第 {index} 条自动化",
-                }
-                for index in range(1, 26)
+                    "id": "houzzkit_ai_monday",
+                    "alias": "周一提醒",
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "reminder",
+                        "houzzkit_ai_semantic_text": "主题: 周一提醒\n动作: 提醒用户\n对象: 用户\n意图: 定期提醒用户",
+                        "houzzkit_ai_reminder": {
+                            "schedule": {
+                                "type": "time",
+                                "at": "09:00:00",
+                                "weekday": ["mon"],
+                            },
+                            "message": "周一提醒",
+                        },
+                    },
+                },
+                {
+                    "id": "houzzkit_ai_delay",
+                    "alias": "延迟提醒",
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "reminder",
+                        "houzzkit_ai_semantic_text": "主题: 延迟提醒\n动作: 提醒用户\n对象: 用户\n意图: 延迟后提醒用户",
+                        "houzzkit_ai_reminder": {
+                            "schedule": {
+                                "type": "delay",
+                                "duration": {"minutes": 3},
+                            },
+                            "message": "延迟提醒",
+                        },
+                    },
+                },
+                {
+                    "id": "houzzkit_ai_motion_then_time",
+                    "alias": "多人触发自动化",
+                    "triggers": [
+                        {
+                            "trigger": "state",
+                            "entity_id": "binary_sensor.motion",
+                            "to": "on",
+                        },
+                        {
+                            "trigger": "time",
+                            "at": "09:00:00",
+                            "weekday": ["mon"],
+                        },
+                    ],
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "automation",
+                        "houzzkit_ai_semantic_text": "主题: 多人触发自动化\n触发: 传感器或定时触发\n动作: 执行动作\n对象: 自动化\n意图: 任一触发条件满足时执行",
+                    },
+                },
             ]
 
         with patch.object(ia, "_read_automation_configs", fake_configs):
-            first_page = asyncio.run(
+            weekday_result = asyncio.run(
                 ia._list_managed_automations(
                     _FakeHass(),
-                    query="",
-                    limit=20,
-                    cursor=None,
+                    kind="reminder",
+                    schedule_filter={"type": "time", "weekday": ["mon"]},
                 )
             )
-            second_page = asyncio.run(
+            delay_result = asyncio.run(
                 ia._list_managed_automations(
                     _FakeHass(),
-                    query="",
-                    limit=20,
-                    cursor="20",
+                    kind="reminder",
+                    schedule_filter={"type": "delay"},
+                )
+            )
+            automation_weekday_result = asyncio.run(
+                ia._list_managed_automations(
+                    _FakeHass(),
+                    kind="automation",
+                    schedule_filter={"type": "time", "weekday": ["mon"]},
                 )
             )
 
-        self.assertTrue(first_page["success"])
-        self.assertEqual(first_page["total_count"], 25)
-        self.assertEqual(len(first_page["automations"]), 20)
-        self.assertEqual(first_page["next_cursor"], "20")
-        self.assertTrue(second_page["success"])
-        self.assertEqual(len(second_page["automations"]), 5)
-        self.assertEqual(second_page["automations"][0]["id"], "houzzkit_ai_21")
-        self.assertIsNone(second_page["next_cursor"])
+        self.assertTrue(weekday_result["success"])
+        self.assertEqual(
+            [item["id"] for item in weekday_result["automations"]],
+            ["houzzkit_ai_monday"],
+        )
+        self.assertTrue(delay_result["success"])
+        self.assertEqual(
+            [item["id"] for item in delay_result["automations"]],
+            ["houzzkit_ai_delay"],
+        )
+        self.assertTrue(automation_weekday_result["success"])
+        self.assertEqual(
+            [item["id"] for item in automation_weekday_result["automations"]],
+            ["houzzkit_ai_motion_then_time"],
+        )
 
     def test_delete_managed_automation_rejects_non_houzzkit_id(self) -> None:
         async def fake_write(*_args: object, **_kwargs: object) -> None:
@@ -557,6 +626,186 @@ class AutomationProtocolTest(unittest.TestCase):
             hass.services.calls,
             [("automation", "reload", {}, True)],
         )
+
+    def test_get_managed_automation_returns_editable_snapshot(self) -> None:
+        snapshot = {
+            "alias": "晚上开灯",
+            "semantic_text": "主题: 开灯\n触发: 晚上\n动作: 开灯\n对象: 灯",
+            "triggers": [{"trigger": "time", "at": "19:00:00"}],
+            "actions": [{"action": "script.turn_on"}],
+            "mode": "single",
+        }
+
+        async def fake_configs(hass: object) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "houzzkit_ai_light",
+                    "alias": "晚上开灯",
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "automation",
+                        "houzzkit_ai_semantic_text": snapshot["semantic_text"],
+                        "houzzkit_ai_editable_snapshot": snapshot,
+                    },
+                }
+            ]
+
+        with patch.object(ia, "_read_automation_configs", fake_configs):
+            result = asyncio.run(
+                ia._get_managed_automation(_FakeHass(), "houzzkit_ai_light")
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["automation"], snapshot)
+        self.assertNotIn("id", result["automation"])
+
+    def test_get_managed_automation_without_snapshot_returns_not_editable(self) -> None:
+        async def fake_configs(hass: object) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "houzzkit_ai_old",
+                    "alias": "旧自动化",
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "automation",
+                        "houzzkit_ai_semantic_text": "主题: 旧自动化\n触发: 晚上\n动作: 开灯\n对象: 灯",
+                    },
+                }
+            ]
+
+        with patch.object(ia, "_read_automation_configs", fake_configs):
+            result = asyncio.run(
+                ia._get_managed_automation(_FakeHass(), "houzzkit_ai_old")
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["failure_type"], "not_editable")
+
+    def test_replace_managed_automation_replaces_same_id_and_saves_snapshot(self) -> None:
+        written: list[list[dict[str, Any]]] = []
+        old_snapshot = {
+            "alias": "晚上开灯",
+            "semantic_text": "主题: 开灯\n触发: 晚上7点\n动作: 开灯\n对象: 灯",
+            "triggers": [{"trigger": "time", "at": "19:00:00"}],
+            "actions": [{"action": "script.turn_on"}],
+            "mode": "single",
+        }
+        new_snapshot = {
+            "alias": "晚上8点开灯",
+            "semantic_text": "主题: 开灯\n触发: 晚上8点\n动作: 开灯\n对象: 灯",
+            "triggers": [{"trigger": "time", "at": "20:00:00"}],
+            "actions": [{"action": "script.turn_on"}],
+            "mode": "single",
+        }
+
+        async def fake_configs(hass: object) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "houzzkit_ai_light",
+                    "alias": "晚上开灯",
+                    "triggers": [{"platform": "time", "at": "19:00:00"}],
+                    "actions": [{"action": "script.turn_on"}],
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "automation",
+                        "houzzkit_ai_semantic_text": old_snapshot["semantic_text"],
+                        "houzzkit_ai_editable_snapshot": old_snapshot,
+                    },
+                },
+                {"id": "manual_keep", "alias": "保留"},
+            ]
+
+        async def fake_write(hass: object, configs: list[dict[str, Any]]) -> None:
+            written.append(configs)
+
+        async def fake_validate(hass: object, config_id: str, config: dict[str, Any]) -> None:
+            return None
+
+        hass = types.SimpleNamespace(services=_FakeServices())
+        intent_obj = types.SimpleNamespace(hass=hass)
+        with (
+            patch.object(ia, "_read_automation_configs", fake_configs),
+            patch.object(ia, "_write_automation_configs", fake_write),
+            patch.object(ia, "async_validate_config_item", fake_validate),
+        ):
+            result = asyncio.run(
+                ia._replace_managed_automation(
+                    intent_obj,
+                    "houzzkit_ai_light",
+                    new_snapshot,
+                    editable_snapshot=new_snapshot,
+                )
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["id"], "houzzkit_ai_light")
+        self.assertEqual(len(written), 1)
+        replaced = written[0][0]
+        self.assertEqual(replaced["id"], "houzzkit_ai_light")
+        self.assertEqual(replaced["alias"], "晚上8点开灯")
+        self.assertEqual(replaced["triggers"], [{"trigger": "time", "at": "20:00:00"}])
+        self.assertEqual(
+            replaced["variables"]["houzzkit_ai_editable_snapshot"],
+            new_snapshot,
+        )
+        self.assertEqual(written[0][1], {"id": "manual_keep", "alias": "保留"})
+        self.assertEqual(hass.services.calls, [("automation", "reload", {}, True)])
+
+    def test_replace_managed_automation_validation_failure_does_not_write(self) -> None:
+        written: list[list[dict[str, Any]]] = []
+        old_snapshot = {
+            "alias": "晚上开灯",
+            "semantic_text": "主题: 开灯\n触发: 晚上\n动作: 开灯\n对象: 灯",
+            "triggers": [{"trigger": "time", "at": "19:00:00"}],
+            "actions": [{"action": "script.turn_on"}],
+        }
+        invalid_snapshot = {
+            "alias": "坏计划",
+            "semantic_text": "主题: 坏计划\n触发: 晚上\n动作: 开灯\n对象: 灯",
+            "triggers": [{"trigger": "time", "at": "20:00:00"}],
+            "actions": [{"action": "script.turn_on"}],
+        }
+
+        async def fake_configs(hass: object) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "houzzkit_ai_light",
+                    "alias": "晚上开灯",
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "automation",
+                        "houzzkit_ai_semantic_text": old_snapshot["semantic_text"],
+                        "houzzkit_ai_editable_snapshot": old_snapshot,
+                    },
+                }
+            ]
+
+        async def fake_write(hass: object, configs: list[dict[str, Any]]) -> None:
+            written.append(configs)
+
+        async def fake_validate(
+            hass: object,
+            config_id: str,
+            config: dict[str, Any],
+        ) -> None:
+            raise ia.HomeAssistantError("invalid automation")
+
+        hass = types.SimpleNamespace(services=_FakeServices())
+        intent_obj = types.SimpleNamespace(hass=hass)
+        with (
+            patch.object(ia, "_read_automation_configs", fake_configs),
+            patch.object(ia, "_write_automation_configs", fake_write),
+            patch.object(ia, "async_validate_config_item", fake_validate),
+        ):
+            result = asyncio.run(
+                ia._replace_managed_automation(
+                    intent_obj,
+                    "houzzkit_ai_light",
+                    invalid_snapshot,
+                    editable_snapshot=invalid_snapshot,
+                )
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["failure_type"], "plan_invalid")
+        self.assertEqual(written, [])
+        self.assertEqual(hass.services.calls, [])
 
     def test_time_date_trigger_becomes_time_trigger_with_date_guard(self) -> None:
         automation = {
@@ -766,6 +1015,7 @@ class AutomationProtocolTest(unittest.TestCase):
 
     def test_internal_cleanup_action_is_appended_only_by_internal_flow(self) -> None:
         automation = {
+            "semantic_text": "主题: 一次性自动化\n触发: 指定日期时间\n动作: 执行脚本\n对象: 脚本\n意图: 到指定日期执行脚本",
             "triggers": [
                 {"trigger": "time", "date": "2026-06-04", "at": "08:00:00"}
             ],
@@ -795,6 +1045,7 @@ class AutomationProtocolTest(unittest.TestCase):
     def test_reminder_config_writes_managed_kind_variable(self) -> None:
         automation = {
             "alias": "喝水提醒",
+            "semantic_text": "主题: 喝水提醒\n动作: 提醒用户喝水\n对象: 水\n意图: 到时间提醒用户喝水",
             "triggers": [{"trigger": "time", "at": "09:00:00"}],
             "actions": [{"action": "houzzkit_ai.notify", "data": {"message": "喝水"}}],
         }
@@ -830,15 +1081,22 @@ class AutomationProtocolTest(unittest.TestCase):
                 "message": "喝水",
             },
         )
+        self.assertEqual(
+            config["variables"]["houzzkit_ai_semantic_text"],
+            "主题: 喝水提醒\n动作: 提醒用户喝水\n对象: 水\n意图: 到时间提醒用户喝水",
+        )
+        self.assertNotIn("semantic_text", config)
 
     def test_managed_kind_variable_preserves_existing_variables(self) -> None:
         automation = {
             "alias": "开灯自动化",
+            "semantic_text": "主题: 开灯自动化\n触发: 晚上\n动作: 打开灯\n对象: 灯\n意图: 到条件时开灯",
             "triggers": [{"trigger": "time", "at": "19:00:00"}],
             "actions": [{"action": "script.turn_on"}],
             "variables": {
                 "user_value": "keep",
                 "houzzkit_ai_managed_kind": "reminder",
+                "houzzkit_ai_semantic_text": "旧文本",
             },
         }
 
@@ -857,6 +1115,30 @@ class AutomationProtocolTest(unittest.TestCase):
             config["variables"]["houzzkit_ai_managed_kind"],
             "automation",
         )
+        self.assertEqual(
+            config["variables"]["houzzkit_ai_semantic_text"],
+            "主题: 开灯自动化\n触发: 晚上\n动作: 打开灯\n对象: 灯\n意图: 到条件时开灯",
+        )
+        self.assertNotIn("semantic_text", config)
+
+    def test_automation_config_requires_semantic_text(self) -> None:
+        automation = {
+            "alias": "开灯自动化",
+            "triggers": [{"trigger": "time", "at": "19:00:00"}],
+            "actions": [{"action": "script.turn_on"}],
+        }
+
+        config, errors = asyncio.run(
+            ia._automation_config_from_internal_plan(
+                _FakeIntent(),
+                "houzzkit_ai_light",
+                automation,
+                managed_kind="automation",
+            )
+        )
+
+        self.assertEqual(config, {})
+        self.assertIn("automation.semantic_text is required.", errors)
 
     def test_user_cleanup_action_is_rejected(self) -> None:
         errors: list[str] = []
@@ -872,6 +1154,138 @@ class AutomationProtocolTest(unittest.TestCase):
 
         self.assertEqual(result, [])
         self.assertIn("internal", " ".join(errors))
+
+    def test_resolved_target_accepts_duplicate_fan_entities(self) -> None:
+        async def fake_match_intent_entities(
+            intent_obj: object,
+            targets: list[dict[str, Any]],
+        ) -> tuple[None, list[types.SimpleNamespace]]:
+            self.assertEqual(
+                targets,
+                [
+                    {
+                        "area": "办公区",
+                        "devices": [{"name": "空气净化器", "domains": ["fan"]}],
+                    }
+                ],
+            )
+            return None, [
+                _matched_entity(
+                    "fan.air_purifier_left",
+                    "fan",
+                    name="空气净化器",
+                    area_name="办公区",
+                ),
+                _matched_entity(
+                    "fan.air_purifier_right",
+                    "fan",
+                    name="空气净化器",
+                    area_name="办公区",
+                ),
+            ]
+
+        errors: list[str] = []
+        action = {
+            "operation": "turn_on",
+            "resolved_targets": [
+                {
+                    "area": "办公区",
+                    "devices": [{"name": "空气净化器", "domains": ["fan"]}],
+                }
+            ],
+        }
+
+        with patch.object(ia, "match_intent_entities", fake_match_intent_entities):
+            result = asyncio.run(
+                ia._convert_action_with_resolved_targets(
+                    _FakeIntent(),
+                    action,
+                    errors,
+                    path="automation.actions[0]",
+                )
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            result,
+            [
+                {
+                    "action": "fan.turn_on",
+                    "target": {
+                        "entity_id": [
+                            "fan.air_purifier_left",
+                            "fan.air_purifier_right",
+                        ]
+                    },
+                }
+            ],
+        )
+
+    def test_resolved_target_accepts_duplicate_cover_entities(self) -> None:
+        async def fake_match_intent_entities(
+            intent_obj: object,
+            targets: list[dict[str, Any]],
+        ) -> tuple[None, list[types.SimpleNamespace]]:
+            self.assertEqual(
+                targets,
+                [
+                    {
+                        "area": "直播间",
+                        "devices": [{"name": "窗帘 电机", "domains": ["cover"]}],
+                    }
+                ],
+            )
+            return None, [
+                _matched_entity(
+                    "cover.curtain_left",
+                    "cover",
+                    name="窗帘 电机",
+                    area_name="直播间",
+                ),
+                _matched_entity(
+                    "cover.curtain_right",
+                    "cover",
+                    name="窗帘 电机",
+                    area_name="直播间",
+                ),
+            ]
+
+        errors: list[str] = []
+        action = {
+            "operation": "turn_on",
+            "resolved_targets": [
+                {
+                    "area": "直播间",
+                    "devices": [{"name": "窗帘 电机", "domains": ["cover"]}],
+                }
+            ],
+        }
+
+        with patch.object(ia, "match_intent_entities", fake_match_intent_entities):
+            result = asyncio.run(
+                ia._convert_action_with_resolved_targets(
+                    _FakeIntent(),
+                    action,
+                    errors,
+                    path="automation.actions[0]",
+                )
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            result,
+            [
+                {
+                    "action": "cover.open_cover",
+                    "target": {
+                        "entity_id": [
+                            "cover.curtain_left",
+                            "cover.curtain_right",
+                        ]
+                    },
+                }
+            ],
+        )
 
     def test_cleanup_marker_must_match_generated_action(self) -> None:
         automation = {
