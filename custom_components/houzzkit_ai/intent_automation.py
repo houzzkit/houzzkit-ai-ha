@@ -1453,8 +1453,7 @@ def _interval_template_condition(every_minutes: int) -> dict[str, Any]:
     return {
         CONF_CONDITION: "template",
         CONF_VALUE_TEMPLATE: (
-            "{{ ((now().hour * 60) + now().minute) % "
-            f"{every_minutes} == 0 }}"
+            f"{{{{ ((now().hour * 60) + now().minute) % {every_minutes} == 0 }}}}"
         ),
     }
 

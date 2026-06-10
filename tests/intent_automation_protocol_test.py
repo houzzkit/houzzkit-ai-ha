@@ -13,6 +13,8 @@ import unittest
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from jinja2 import Environment
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "custom_components/houzzkit_ai/intent_automation.py"
@@ -64,6 +66,8 @@ def _load_intent_automation() -> types.ModuleType:
 
 ia = _load_intent_automation()
 ac = sys.modules["custom_components.houzzkit_ai.automation_capabilities"]
+_JINJA_ENV = Environment()
+_INTERVAL_90_TEMPLATE = "{{ ((now().hour * 60) + now().minute) % 90 == 0 }}"
 
 
 def _convert_triggers(
@@ -80,6 +84,14 @@ def _convert_triggers(
     ):
         ia._convert_plan_time_triggers(automation, errors, managed_kind=managed_kind)
     return errors
+
+
+def _assert_valid_jinja_template(test_case: unittest.TestCase, template: str) -> None:
+    """确认写入 HA 的模板至少能通过 Jinja 语法解析。"""
+    try:
+        _JINJA_ENV.parse(template)
+    except Exception as err:  # pragma: no cover - 失败时保留原始模板便于排查
+        test_case.fail(f"invalid jinja template {template!r}: {err}")
 
 
 class _FakeServices:
@@ -915,7 +927,14 @@ class AutomationProtocolTest(unittest.TestCase):
         self.assertNotIn("trigger", trigger)
         self.assertNotIn("every_minutes", trigger)
         self.assertEqual(automation["conditions"]["condition"], "template")
-        self.assertIn("% 90 == 0", automation["conditions"]["value_template"])
+        self.assertEqual(
+            automation["conditions"]["value_template"],
+            _INTERVAL_90_TEMPLATE,
+        )
+        _assert_valid_jinja_template(
+            self,
+            automation["conditions"]["value_template"],
+        )
 
     def test_interval_trigger_rejects_invalid_shapes(self) -> None:
         cases = [
@@ -1229,7 +1248,11 @@ class AutomationProtocolTest(unittest.TestCase):
         )
         self.assertEqual(config["triggers"][0]["platform"], "time_pattern")
         self.assertEqual(config["triggers"][0]["minutes"], "*")
-        self.assertIn("% 90 == 0", config["conditions"]["value_template"])
+        self.assertEqual(
+            config["conditions"]["value_template"],
+            _INTERVAL_90_TEMPLATE,
+        )
+        _assert_valid_jinja_template(self, config["conditions"]["value_template"])
 
     def test_managed_kind_variable_preserves_existing_variables(self) -> None:
         automation = {
