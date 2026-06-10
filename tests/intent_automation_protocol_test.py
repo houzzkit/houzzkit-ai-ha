@@ -166,6 +166,24 @@ def _matched_entity(
     )
 
 
+def _voice_text_entry(entity_id: str = "text.speaker_voice") -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        entity_id=entity_id,
+        domain="text",
+        disabled=False,
+        name="播放语音",
+        original_name="播放语音",
+        suggested_object_id="bo_fang_yu_yin",
+        unique_id=f"{entity_id}-bo_fang_yu_yin",
+    )
+
+
+def _speaker_intent() -> _FakeIntent:
+    intent_obj = _FakeIntent()
+    intent_obj.slots = {"_speaker_id": {"value": "speaker-1"}}
+    return intent_obj
+
+
 class AutomationProtocolTest(unittest.TestCase):
     def test_list_context_returns_plan_features_and_current_date(self) -> None:
         async def fake_summaries(hass: object) -> list[dict[str, str]]:
@@ -1253,6 +1271,73 @@ class AutomationProtocolTest(unittest.TestCase):
             _INTERVAL_90_TEMPLATE,
         )
         _assert_valid_jinja_template(self, config["conditions"]["value_template"])
+
+    def test_reminder_notify_sets_dynamic_text_value(self) -> None:
+        automation = {
+            "alias": "喝水提醒",
+            "semantic_text": "主题: 喝水提醒\n动作: 提醒用户喝水\n对象: 水\n意图: 到时间提醒用户喝水",
+            "triggers": [{"trigger": "time", "at": "09:00:00"}],
+            "actions": [{"action": "houzzkit_ai.notify", "data": {"message": "喝水"}}],
+        }
+
+        with patch.object(ia, "get_entities", return_value=[_voice_text_entry()]):
+            config, errors = asyncio.run(
+                ia._automation_config_from_internal_plan(
+                    _speaker_intent(),
+                    "houzzkit_ai_reminder",
+                    automation,
+                    managed_kind="reminder",
+                )
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(config["actions"][0]["action"], "text.set_value")
+        self.assertEqual(config["actions"][0]["data"]["value"], "{喝水}")
+        self.assertEqual(
+            config["variables"]["houzzkit_ai_reminder"],
+            {
+                "schedule": {"type": "time", "at": "09:00:00"},
+                "message": "喝水",
+            },
+        )
+
+    def test_automation_notify_sets_dynamic_text_value(self) -> None:
+        automation = {
+            "alias": "开灯后提醒",
+            "semantic_text": "主题: 开灯后提醒\n触发: 晚上九点\n动作: 提醒用户喝水\n对象: 水",
+            "triggers": [{"trigger": "time", "at": "21:00:00"}],
+            "actions": [{"action": "houzzkit_ai.notify", "data": {"message": "喝水"}}],
+        }
+
+        with patch.object(ia, "get_entities", return_value=[_voice_text_entry()]):
+            config, errors = asyncio.run(
+                ia._automation_config_from_internal_plan(
+                    _speaker_intent(),
+                    "houzzkit_ai_notify",
+                    automation,
+                    managed_kind="automation",
+                )
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(config["actions"][0]["action"], "text.set_value")
+        self.assertEqual(config["actions"][0]["data"]["value"], "{喝水}")
+
+    def test_warn_keeps_static_text_value(self) -> None:
+        errors: list[str] = []
+        action = {"action": "houzzkit_ai.warn", "data": {"message": "厨房漏水"}}
+
+        with patch.object(ia, "get_entities", return_value=[_voice_text_entry()]):
+            result = ia._convert_houzzkit_notify_action(
+                _speaker_intent(),
+                action,
+                errors,
+                path="automation.actions[0]",
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(result[0]["action"], "text.set_value")
+        self.assertEqual(result[0]["data"]["value"], "厨房漏水")
 
     def test_managed_kind_variable_preserves_existing_variables(self) -> None:
         automation = {

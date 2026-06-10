@@ -1795,9 +1795,21 @@ def _convert_houzzkit_notify_action(
             **passthrough,
             "action": f"{TEXT_DOMAIN}.{TEXT_SERVICE_SET_VALUE}",
             "target": {ATTR_ENTITY_ID: text_entity_id},
-            "data": {TEXT_ATTR_VALUE: message.strip()},
+            "data": {
+                TEXT_ATTR_VALUE: _houzzkit_notification_text_value(
+                    action_name,
+                    message.strip(),
+                )
+            },
         }
     ]
+
+
+def _houzzkit_notification_text_value(action_name: str, message: str) -> str:
+    """把动态提醒控制收口在 HA 集成侧，避免把内部格式暴露给 LLM 计划。"""
+    if action_name == _HOUZZKIT_NOTIFY_ACTION:
+        return f"{{{message}}}"
+    return message
 
 
 def _current_speaker_voice_text_entity_id(
