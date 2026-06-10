@@ -70,6 +70,7 @@ def _convert_triggers(
     automation: dict,
     *,
     now: datetime | None = None,
+    managed_kind: str = "automation",
 ) -> list[str]:
     errors: list[str] = []
     frozen_now = now or datetime(2026, 6, 3, 9, 0, 0, tzinfo=LOCAL_TZ)
@@ -77,7 +78,7 @@ def _convert_triggers(
         patch.object(ia.dt_util, "now", return_value=frozen_now),
         patch.object(ia.dt_util, "get_default_time_zone", return_value=LOCAL_TZ),
     ):
-        ia._convert_plan_time_triggers(automation, errors)
+        ia._convert_plan_time_triggers(automation, errors, managed_kind=managed_kind)
     return errors
 
 
@@ -171,7 +172,7 @@ class AutomationProtocolTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(
             result["supported_plan_features"],
-            ["time_trigger_date", "time_trigger_delay"],
+            ["time_trigger_date", "time_trigger_delay", "time_trigger_interval"],
         )
         self.assertEqual(result["current_date"], "2026-06-03")
 
@@ -185,6 +186,7 @@ class AutomationProtocolTest(unittest.TestCase):
                 "supported_plan_features": [
                     "time_trigger_date",
                     "time_trigger_delay",
+                    "time_trigger_interval",
                 ],
             },
         )
@@ -519,6 +521,21 @@ class AutomationProtocolTest(unittest.TestCase):
                     },
                 },
                 {
+                    "id": "houzzkit_ai_interval",
+                    "alias": "每一个半小时喝水提醒",
+                    "variables": {
+                        "houzzkit_ai_managed_kind": "reminder",
+                        "houzzkit_ai_semantic_text": "主题: 喝水提醒\n动作: 提醒用户喝水\n对象: 水\n意图: 固定间隔提醒用户",
+                        "houzzkit_ai_reminder": {
+                            "schedule": {
+                                "type": "interval",
+                                "every_minutes": 90,
+                            },
+                            "message": "喝水啦",
+                        },
+                    },
+                },
+                {
                     "id": "houzzkit_ai_motion_then_time",
                     "alias": "多人触发自动化",
                     "triggers": [
@@ -562,11 +579,42 @@ class AutomationProtocolTest(unittest.TestCase):
                     schedule_filter={"type": "time", "weekday": ["mon"]},
                 )
             )
+            interval_result = asyncio.run(
+                ia._list_managed_automations(
+                    _FakeHass(),
+                    kind="reminder",
+                    schedule_filter={"type": "interval"},
+                )
+            )
+            interval_exact_result = asyncio.run(
+                ia._list_managed_automations(
+                    _FakeHass(),
+                    kind="reminder",
+                    schedule_filter={"type": "interval", "every_minutes": 90},
+                )
+            )
+            interval_time_range_result = asyncio.run(
+                ia._list_managed_automations(
+                    _FakeHass(),
+                    kind="reminder",
+                    schedule_filter={
+                        "type": "time",
+                        "time_range": {"from": "01:29:00", "to": "01:31:00"},
+                    },
+                )
+            )
+            interval_miss_result = asyncio.run(
+                ia._list_managed_automations(
+                    _FakeHass(),
+                    kind="reminder",
+                    schedule_filter={"type": "interval", "every_minutes": 60},
+                )
+            )
 
         self.assertTrue(weekday_result["success"])
         self.assertEqual(
             [item["id"] for item in weekday_result["automations"]],
-            ["houzzkit_ai_monday"],
+            ["houzzkit_ai_monday", "houzzkit_ai_interval"],
         )
         self.assertTrue(delay_result["success"])
         self.assertEqual(
@@ -578,6 +626,23 @@ class AutomationProtocolTest(unittest.TestCase):
             [item["id"] for item in automation_weekday_result["automations"]],
             ["houzzkit_ai_motion_then_time"],
         )
+        self.assertTrue(interval_result["success"])
+        self.assertEqual(
+            [item["id"] for item in interval_result["automations"]],
+            ["houzzkit_ai_interval"],
+        )
+        self.assertTrue(interval_exact_result["success"])
+        self.assertEqual(
+            [item["id"] for item in interval_exact_result["automations"]],
+            ["houzzkit_ai_interval"],
+        )
+        self.assertTrue(interval_time_range_result["success"])
+        self.assertEqual(
+            [item["id"] for item in interval_time_range_result["automations"]],
+            ["houzzkit_ai_interval"],
+        )
+        self.assertTrue(interval_miss_result["success"])
+        self.assertEqual(interval_miss_result["automations"], [])
 
     def test_delete_managed_automation_rejects_non_houzzkit_id(self) -> None:
         async def fake_write(*_args: object, **_kwargs: object) -> None:
@@ -838,6 +903,46 @@ class AutomationProtocolTest(unittest.TestCase):
         self.assertNotIn("duration", trigger)
         self.assertIn("2026-06-03", automation["conditions"]["value_template"])
 
+    def test_interval_trigger_becomes_time_pattern_with_modulo_guard(self) -> None:
+        automation = {"triggers": [{"trigger": "interval", "every_minutes": 90}]}
+
+        errors = _convert_triggers(automation, managed_kind="reminder")
+
+        self.assertEqual(errors, [])
+        trigger = automation["triggers"][0]
+        self.assertEqual(trigger["platform"], "time_pattern")
+        self.assertEqual(trigger["minutes"], "*")
+        self.assertNotIn("trigger", trigger)
+        self.assertNotIn("every_minutes", trigger)
+        self.assertEqual(automation["conditions"]["condition"], "template")
+        self.assertIn("% 90 == 0", automation["conditions"]["value_template"])
+
+    def test_interval_trigger_rejects_invalid_shapes(self) -> None:
+        cases = [
+            ({"every_minutes": 0}, "between 1 and 720"),
+            ({"every_minutes": 721}, "between 1 and 720"),
+            ({"every_minutes": 1.5}, "between 1 and 720"),
+            ({"every_minutes": True}, "between 1 and 720"),
+            ({"every_minutes": 5, "seconds": 30}, "unsupported keys"),
+            ({"every_minutes": 5, "at": "00:05:00"}, "cannot include"),
+        ]
+        for payload, expected_error in cases:
+            with self.subTest(payload=payload):
+                automation = {"triggers": [{"trigger": "interval", **payload}]}
+
+                errors = _convert_triggers(automation, managed_kind="reminder")
+
+                self.assertTrue(errors)
+                self.assertIn(expected_error, " ".join(errors))
+
+    def test_interval_trigger_is_only_supported_for_reminder(self) -> None:
+        automation = {"triggers": [{"trigger": "interval", "every_minutes": 5}]}
+
+        errors = _convert_triggers(automation, managed_kind="automation")
+
+        self.assertTrue(errors)
+        self.assertIn("only supported for reminder", " ".join(errors))
+
     def test_delay_duration_rejects_invalid_shapes(self) -> None:
         cases = [
             ({"duration": "1d3h2m3s"}, "must be an object"),
@@ -1086,6 +1191,45 @@ class AutomationProtocolTest(unittest.TestCase):
             "主题: 喝水提醒\n动作: 提醒用户喝水\n对象: 水\n意图: 到时间提醒用户喝水",
         )
         self.assertNotIn("semantic_text", config)
+
+    def test_reminder_interval_config_writes_metadata_and_time_pattern(self) -> None:
+        automation = {
+            "alias": "每一个半小时喝水提醒",
+            "semantic_text": "主题: 喝水提醒\n动作: 提醒用户喝水\n对象: 水\n意图: 固定间隔提醒用户喝水",
+            "triggers": [{"trigger": "interval", "every_minutes": 90}],
+            "actions": [{"action": "houzzkit_ai.notify", "data": {"message": "喝水啦"}}],
+        }
+
+        async def fake_convert_action(
+            intent_obj: object,
+            action: dict[str, Any],
+            errors: list[str],
+            *,
+            path: str,
+        ) -> list[dict[str, Any]]:
+            return [action]
+
+        with patch.object(ia, "_convert_action_with_resolved_targets", fake_convert_action):
+            config, errors = asyncio.run(
+                ia._automation_config_from_internal_plan(
+                    _FakeIntent(),
+                    "houzzkit_ai_reminder",
+                    automation,
+                    managed_kind="reminder",
+                )
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            config["variables"]["houzzkit_ai_reminder"],
+            {
+                "schedule": {"type": "interval", "every_minutes": 90},
+                "message": "喝水啦",
+            },
+        )
+        self.assertEqual(config["triggers"][0]["platform"], "time_pattern")
+        self.assertEqual(config["triggers"][0]["minutes"], "*")
+        self.assertIn("% 90 == 0", config["conditions"]["value_template"])
 
     def test_managed_kind_variable_preserves_existing_variables(self) -> None:
         automation = {

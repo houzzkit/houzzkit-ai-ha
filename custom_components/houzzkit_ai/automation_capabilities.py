@@ -8,7 +8,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HOUZZKIT_AI_INITIALIZE_METADATA_KEY = "houzzkit_ai"
 MCP_SERVER_VERSION = "2.3.0"
-SUPPORTED_PLAN_FEATURES = ["time_trigger_date", "time_trigger_delay"]
+SUPPORTED_PLAN_FEATURES = [
+    "time_trigger_date",
+    "time_trigger_delay",
+    "time_trigger_interval",
+]
 
 
 def automation_initialize_metadata(local_timezone: Any) -> dict[str, Any] | None:

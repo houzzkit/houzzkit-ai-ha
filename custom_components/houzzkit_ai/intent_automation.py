@@ -86,6 +86,9 @@ _SUPPORTED_PLAN_FEATURES = SUPPORTED_PLAN_FEATURES
 _CURRENT_DATE_FIELD = "current_date"
 _DELAY_DURATION_FIELDS = {"days", "hours", "minutes", "seconds"}
 _DELAY_TRIGGER_CONFLICT_FIELDS = {CONF_AT, "date", CONF_WEEKDAY}
+_INTERVAL_MINUTES_MIN = 1
+_INTERVAL_MINUTES_MAX = 12 * 60
+_INTERVAL_TRIGGER_CONFLICT_FIELDS = {CONF_AT, "date", CONF_WEEKDAY, "duration"}
 _LOCAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _LOCAL_TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 _ONE_SHOT_TRIGGER_ID_PREFIX = "houzzkit_ai_once_"
@@ -925,7 +928,7 @@ async def _automation_config_from_internal_plan(
 
     converted = deepcopy(automation)
     converted.pop(_SEMANTIC_TEXT_FIELD, None)
-    _convert_plan_time_triggers(converted, errors)
+    _convert_plan_time_triggers(converted, errors, managed_kind=managed_kind)
     _reject_delay_conditions(
         converted.get(CONF_CONDITIONS),
         errors,
@@ -1151,8 +1154,10 @@ def _append_one_shot_cleanup_action(
 def _convert_plan_time_triggers(
     automation: dict[str, Any],
     errors: list[str],
+    *,
+    managed_kind: str = _MANAGED_KIND_AUTOMATION,
 ) -> None:
-    """把 ai-server 的日期/延迟协议转换为 HA 可加载的 time trigger。"""
+    """把 ai-server 的日期/延迟/间隔协议转换为 HA 可加载的 trigger。"""
     trigger_nodes = _automation_trigger_nodes(automation)
     if not trigger_nodes:
         return
@@ -1171,6 +1176,18 @@ def _convert_plan_time_triggers(
 
         if "date" in trigger and trigger_type != "time":
             errors.append(f"{path}.date is only supported on time triggers")
+            continue
+
+        if trigger_type == "interval":
+            if managed_kind != _MANAGED_KIND_REMINDER:
+                errors.append(f"{path}.interval trigger is only supported for reminder")
+                continue
+            every_minutes = _rewrite_interval_trigger(trigger, errors, path=path)
+            if every_minutes is not None:
+                _append_automation_condition(
+                    automation,
+                    _interval_template_condition(every_minutes),
+                )
             continue
 
         if trigger_type == "delay":
@@ -1367,6 +1384,79 @@ def _parse_delay_duration(
         minutes=parts["minutes"],
         seconds=parts["seconds"],
     )
+
+
+def _rewrite_interval_trigger(
+    trigger: dict[str, Any],
+    errors: list[str],
+    *,
+    path: str,
+) -> int | None:
+    unsupported_keys = sorted(
+        key
+        for key in trigger
+        if key
+        not in {"trigger", CONF_PLATFORM, CONF_ID, "every_minutes"}
+        | _INTERVAL_TRIGGER_CONFLICT_FIELDS
+    )
+    if unsupported_keys:
+        errors.append(
+            f"{path} interval trigger contains unsupported keys: {unsupported_keys}"
+        )
+
+    conflict_keys = sorted(
+        key for key in _INTERVAL_TRIGGER_CONFLICT_FIELDS if key in trigger
+    )
+    if conflict_keys:
+        errors.append(f"{path} interval trigger cannot include {conflict_keys}")
+
+    every_minutes = _parse_interval_minutes(
+        trigger.get("every_minutes"),
+        errors,
+        path=f"{path}.every_minutes",
+    )
+    if every_minutes is None or unsupported_keys or conflict_keys:
+        return None
+
+    trigger.pop("trigger", None)
+    trigger.pop("every_minutes", None)
+    trigger.pop("date", None)
+    trigger.pop("duration", None)
+    trigger.pop(CONF_WEEKDAY, None)
+    trigger[CONF_PLATFORM] = "time_pattern"
+    trigger["minutes"] = "*"
+    return every_minutes
+
+
+def _parse_interval_minutes(
+    value: Any,
+    errors: list[str],
+    *,
+    path: str,
+) -> int | None:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < _INTERVAL_MINUTES_MIN
+        or value > _INTERVAL_MINUTES_MAX
+    ):
+        errors.append(
+            f"{path} must be an integer between "
+            f"{_INTERVAL_MINUTES_MIN} and {_INTERVAL_MINUTES_MAX}"
+        )
+        return None
+    return value
+
+
+def _interval_template_condition(every_minutes: int) -> dict[str, Any]:
+    # interval 提醒按本地午夜后的分钟数取模；配合每分钟 time_pattern 触发。
+    return {
+        CONF_CONDITION: "template",
+        CONF_VALUE_TEMPLATE: (
+            "{{ ((now().hour * 60) + now().minute) % "
+            f"{every_minutes} == 0 }}"
+        ),
+    }
 
 
 def _rewrite_one_shot_trigger(trigger: dict[str, Any], target_dt: datetime) -> None:
@@ -2105,7 +2195,13 @@ def _reminder_schedule_from_plan_trigger(
             "duration": deepcopy(trigger.get("duration")),
         }
         return _normalize_reminder_schedule(schedule, errors, path=path)
-    errors.append(f"{path}.trigger must be time or delay for reminder")
+    if trigger_type == "interval":
+        schedule = {
+            "type": "interval",
+            "every_minutes": trigger.get("every_minutes"),
+        }
+        return _normalize_reminder_schedule(schedule, errors, path=path)
+    errors.append(f"{path}.trigger must be time, delay, or interval for reminder")
     return None
 
 
@@ -2181,7 +2277,9 @@ def _normalize_reminder_schedule(
         return _normalize_time_reminder_schedule(value, errors, path=path)
     if schedule_type == "delay":
         return _normalize_delay_reminder_schedule(value, errors, path=path)
-    errors.append(f"{path}.type must be time or delay")
+    if schedule_type == "interval":
+        return _normalize_interval_reminder_schedule(value, errors, path=path)
+    errors.append(f"{path}.type must be time, delay, or interval")
     return None
 
 
@@ -2258,6 +2356,25 @@ def _normalize_delay_reminder_schedule(
     return {"type": "delay", "duration": normalized_duration}
 
 
+def _normalize_interval_reminder_schedule(
+    value: dict[str, Any],
+    errors: list[str],
+    *,
+    path: str,
+) -> dict[str, Any] | None:
+    extra_keys = set(value) - {"type", "every_minutes"}
+    if extra_keys:
+        errors.append(f"{path} contains unsupported keys: {sorted(extra_keys)}")
+    every_minutes = _parse_interval_minutes(
+        value.get("every_minutes"),
+        errors,
+        path=f"{path}.every_minutes",
+    )
+    if every_minutes is None or extra_keys:
+        return None
+    return {"type": "interval", "every_minutes": every_minutes}
+
+
 def _semantic_text_for_automation(automation: dict[str, Any]) -> str | None:
     variables = automation.get(CONF_VARIABLES)
     if not isinstance(variables, dict):
@@ -2308,6 +2425,14 @@ def _schedule_from_trigger_node(trigger: dict[str, Any]) -> dict[str, Any] | Non
         errors = []
         normalized = _normalize_reminder_schedule(schedule, errors, path="schedule")
         return normalized if not errors else None
+    if trigger_type == "interval":
+        schedule = {
+            "type": "interval",
+            "every_minutes": trigger.get("every_minutes"),
+        }
+        errors = []
+        normalized = _normalize_reminder_schedule(schedule, errors, path="schedule")
+        return normalized if not errors else None
     return None
 
 
@@ -2333,9 +2458,14 @@ def _schedule_matches_filter(
     filter_type = schedule_filter.get("type")
     if filter_type == "delay":
         return isinstance(schedule, dict) and schedule.get("type") == "delay"
+    if filter_type == "interval":
+        return _interval_schedule_matches_interval_filter(schedule, schedule_filter)
     if filter_type != "time":
         return False
-    if not isinstance(schedule, dict) or schedule.get("type") != "time":
+    if not isinstance(schedule, dict):
+        return False
+    schedule_type = schedule.get("type")
+    if schedule_type not in {"time", "interval"}:
         return False
 
     filter_date = _safe_local_date(schedule_filter.get("date"))
@@ -2358,6 +2488,8 @@ def _schedule_matches_filter(
 
     time_range = schedule_filter.get("time_range")
     if isinstance(time_range, dict):
+        if schedule_type == "interval":
+            return _interval_schedule_matches_time_range(schedule, time_range)
         at = _safe_time_of_day(schedule.get(CONF_AT))
         range_from = _safe_time_of_day(time_range.get("from"))
         range_to = _safe_time_of_day(time_range.get("to"))
@@ -2366,6 +2498,55 @@ def _schedule_matches_filter(
         if at < range_from or at > range_to:
             return False
     return True
+
+
+def _interval_schedule_matches_interval_filter(
+    schedule: Any,
+    schedule_filter: dict[str, Any],
+) -> bool:
+    if not isinstance(schedule, dict) or schedule.get("type") != "interval":
+        return False
+    every_minutes = schedule.get("every_minutes")
+    if not _is_valid_interval_minutes(every_minutes):
+        return False
+    filter_every_minutes = schedule_filter.get("every_minutes")
+    if filter_every_minutes is None:
+        return True
+    return every_minutes == filter_every_minutes
+
+
+def _interval_schedule_matches_time_range(
+    schedule: dict[str, Any],
+    time_range: dict[str, Any],
+) -> bool:
+    every_minutes = schedule.get("every_minutes")
+    range_from = _safe_time_of_day(time_range.get("from"))
+    range_to = _safe_time_of_day(time_range.get("to"))
+    if (
+        not _is_valid_interval_minutes(every_minutes)
+        or range_from is None
+        or range_to is None
+    ):
+        return False
+    from_seconds = _seconds_since_midnight(range_from)
+    to_seconds = _seconds_since_midnight(range_to)
+    interval_seconds = every_minutes * 60
+    first_trigger = (
+        (from_seconds + interval_seconds - 1) // interval_seconds
+    ) * interval_seconds
+    return first_trigger <= to_seconds
+
+
+def _seconds_since_midnight(value: time) -> int:
+    return value.hour * 3600 + value.minute * 60 + value.second
+
+
+def _is_valid_interval_minutes(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and _INTERVAL_MINUTES_MIN <= value <= _INTERVAL_MINUTES_MAX
+    )
 
 
 def _safe_local_date(value: Any) -> date | None:
