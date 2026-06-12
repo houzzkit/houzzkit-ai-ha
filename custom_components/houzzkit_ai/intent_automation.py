@@ -62,7 +62,6 @@ from homeassistant.util.file import write_utf8_file_atomic
 from homeassistant.util.json import JsonObjectType
 from homeassistant.util.yaml import dump, load_yaml
 
-from .automation_capabilities import SUPPORTED_PLAN_FEATURES
 from .const import DOMAIN
 from .houzzkit import get_entities
 from .intent_helper import EntityInfo, match_intent_entities
@@ -82,7 +81,6 @@ _DELETE_ONE_SHOT_ACTION = f"{DOMAIN}.{_DELETE_ONE_SHOT_SERVICE}"
 _ONE_SHOT_CLEANUP_MARKER = "houzzkit_ai_one_shot"
 _VOICE_TEXT_HINTS = ("播放语音", "bo_fang_yu_yin")
 _RESOLVED_TARGETS_FIELD = "resolved_targets"
-_SUPPORTED_PLAN_FEATURES = SUPPORTED_PLAN_FEATURES
 _CURRENT_DATE_FIELD = "current_date"
 _DELAY_DURATION_FIELDS = {"days", "hours", "minutes", "seconds"}
 _DELAY_TRIGGER_CONFLICT_FIELDS = {CONF_AT, "date", CONF_WEEKDAY}
@@ -162,7 +160,6 @@ class HouzzkitListAutomationContextIntent(intent.IntentHandler):
             "entities": entities,
             "services": action_services,
             "supported_actions": action_services,
-            "supported_plan_features": _SUPPORTED_PLAN_FEATURES,
             _CURRENT_DATE_FIELD: dt_util.now().date().isoformat(),
             "existing_automations": existing_automations,
             "automation_create_supported": True,
@@ -1848,11 +1845,11 @@ def _current_speaker_voice_text_entity_id(
         errors.append(f"{path}: ambiguous voice text entities: {entity_ids}")
         return None
 
-    if len(text_entries) == 1:
-        return text_entries[0].entity_id
-
     entity_ids = ", ".join(entry.entity_id for entry in text_entries)
-    errors.append(f"{path}: ambiguous text entities for speaker: {entity_ids}")
+    errors.append(
+        f"{path}: no voice text entity found for speaker: {speaker_id}; "
+        f"text entities: {entity_ids}"
+    )
     return None
 
 

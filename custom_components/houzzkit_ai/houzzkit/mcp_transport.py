@@ -1,4 +1,7 @@
 import logging
+import json
+from typing import Any
+
 import anyio
 import aiohttp
 from custom_components.houzzkit_ai.entry_data import ESPHomeConfigEntry
@@ -14,7 +17,8 @@ from homeassistant.config_entries import ConfigEntry
 from ..automation_capabilities import (
     HOUZZKIT_AI_INITIALIZE_METADATA_KEY,
     MCP_SERVER_VERSION,
-    automation_initialize_metadata,
+    inject_houzzkit_ai_initialize_meta,
+    task_plan_initialize_context,
 )
 from ..const import DOMAIN
 from . import EntryAuthFailedError, get_entry_data
@@ -34,22 +38,41 @@ ATTR_TRANSPORT = "mcp_transport"
 mcp_transport_id = 0
 
 
-def _attach_houzzkit_ai_initialize_metadata(options, hass: HomeAssistant):
-    """Attach automation runtime metadata to MCP initialize capabilities."""
-    metadata = automation_initialize_metadata(getattr(hass.config, "time_zone", None))
-    if metadata is None:
-        return options
+def _attach_houzzkit_ai_initialize_capabilities(
+    options,
+    hass: HomeAssistant,
+) -> dict[str, Any] | None:
+    """Attach Task Plan capability to MCP initialize options."""
+    context = task_plan_initialize_context(getattr(hass.config, "time_zone", None))
+    if context is None:
+        return None
 
     capabilities = getattr(options, "capabilities", None)
     if capabilities is None:
-        return options
+        return None
 
     existing = getattr(capabilities, "experimental", None)
     experimental = dict(existing) if isinstance(existing, dict) else {}
-    # ai-server 依赖这里的 IANA 时区归一化“明天”等相对日期。
-    experimental[HOUZZKIT_AI_INITIALIZE_METADATA_KEY] = metadata
+
+    existing_houzzkit = experimental.get(HOUZZKIT_AI_INITIALIZE_METADATA_KEY)
+    houzzkit_ai = dict(existing_houzzkit) if isinstance(existing_houzzkit, dict) else {}
+    existing_features = houzzkit_ai.get("features")
+    features = dict(existing_features) if isinstance(existing_features, dict) else {}
+    features.update(context["capability"]["features"])
+    houzzkit_ai["features"] = features
+    experimental[HOUZZKIT_AI_INITIALIZE_METADATA_KEY] = houzzkit_ai
     capabilities.experimental = experimental
-    return options
+    return context["meta"]
+
+
+def _serialize_outgoing_message(
+    message: Any,
+    houzzkit_ai_initialize_meta: dict[str, Any] | None,
+) -> str:
+    """Serialize MCP JSON-RPC messages and inject initialize _meta when needed."""
+    payload = message.model_dump(by_alias=True, exclude_none=True, mode="json")
+    inject_houzzkit_ai_initialize_meta(payload, houzzkit_ai_initialize_meta)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry):
@@ -116,7 +139,10 @@ class McpTransport(WsTransport):
             self._mcp_server = await self._create_server(context)
             self._mcp_server.version = MCP_SERVER_VERSION
             options = await self.hass.async_add_executor_job(self._mcp_server.create_initialization_options)
-            _attach_houzzkit_ai_initialize_metadata(options, self.hass)
+            self._houzzkit_ai_initialize_meta = _attach_houzzkit_ai_initialize_capabilities(
+                options,
+                self.hass,
+            )
 
             session_manager = SessionManager()
             async with session_manager.create(Session(self._recv_writer)) as session_id:
@@ -188,7 +214,12 @@ class McpTransport(WsTransport):
                 else:
                     message = session_message
                 self.logger.info("Send message: %s", message)
-                await self._current_ws.send_str(message.model_dump_json(by_alias=True, exclude_none=True))
+                await self._current_ws.send_str(
+                    _serialize_outgoing_message(
+                        message,
+                        getattr(self, "_houzzkit_ai_initialize_meta", None),
+                    )
+                )
         except Exception as err:
             self.logger.error("Error writing to WebSocket: %s", str(err), exc_info=True)
         finally:

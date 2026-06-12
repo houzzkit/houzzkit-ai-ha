@@ -65,7 +65,7 @@ def _load_intent_automation() -> types.ModuleType:
 
 
 ia = _load_intent_automation()
-ac = sys.modules["custom_components.houzzkit_ai.automation_capabilities"]
+ac = importlib.import_module("custom_components.houzzkit_ai.automation_capabilities")
 _JINJA_ENV = Environment()
 _INTERVAL_90_TEMPLATE = "{{ ((now().hour * 60) + now().minute) % 90 == 0 }}"
 
@@ -178,6 +178,18 @@ def _voice_text_entry(entity_id: str = "text.speaker_voice") -> types.SimpleName
     )
 
 
+def _plain_text_entry(entity_id: str, name: str) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        entity_id=entity_id,
+        domain="text",
+        disabled=False,
+        name=name,
+        original_name=name,
+        suggested_object_id=entity_id.rsplit(".", 1)[-1],
+        unique_id=f"{entity_id}-plain-text",
+    )
+
+
 def _speaker_intent() -> _FakeIntent:
     intent_obj = _FakeIntent()
     intent_obj.slots = {"_speaker_id": {"value": "speaker-1"}}
@@ -185,7 +197,7 @@ def _speaker_intent() -> _FakeIntent:
 
 
 class AutomationProtocolTest(unittest.TestCase):
-    def test_list_context_returns_plan_features_and_current_date(self) -> None:
+    def test_list_context_returns_current_date_without_plan_features(self) -> None:
         async def fake_summaries(hass: object) -> list[dict[str, str]]:
             return []
 
@@ -200,28 +212,62 @@ class AutomationProtocolTest(unittest.TestCase):
             )
 
         self.assertTrue(result["success"])
-        self.assertEqual(
-            result["supported_plan_features"],
-            ["time_trigger_date", "time_trigger_delay", "time_trigger_interval"],
-        )
+        self.assertNotIn("supported_plan_features", result)
         self.assertEqual(result["current_date"], "2026-06-03")
 
-    def test_automation_initialize_metadata_uses_valid_local_timezone(self) -> None:
-        metadata = ac.automation_initialize_metadata("Asia/Shanghai")
+    def test_task_plan_initialize_context_uses_valid_local_timezone(self) -> None:
+        context = ac.task_plan_initialize_context("Asia/Shanghai")
 
         self.assertEqual(
-            metadata,
+            context,
             {
-                "local_timezone": "Asia/Shanghai",
-                "supported_plan_features": [
-                    "time_trigger_date",
-                    "time_trigger_delay",
-                    "time_trigger_interval",
-                ],
+                "capability": {"features": {"task_plan": True}},
+                "meta": {"local_timezone": "Asia/Shanghai"},
             },
         )
-        self.assertIsNone(ac.automation_initialize_metadata("UTC+8"))
-        self.assertIsNone(ac.automation_initialize_metadata(""))
+        self.assertIsNone(ac.task_plan_initialize_context("UTC+8"))
+        self.assertIsNone(ac.task_plan_initialize_context(""))
+
+    def test_inject_houzzkit_ai_initialize_meta(self) -> None:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "serverInfo": {"name": "home-assistant", "version": "2.3.0"},
+                "_meta": {"other": {"keep": True}},
+            },
+        }
+
+        result = ac.inject_houzzkit_ai_initialize_meta(
+            payload,
+            {"local_timezone": "Asia/Shanghai"},
+        )
+
+        self.assertIs(result, payload)
+        self.assertEqual(
+            result["result"]["_meta"],
+            {
+                "other": {"keep": True},
+                "houzzkit_ai": {"local_timezone": "Asia/Shanghai"},
+            },
+        )
+
+    def test_inject_houzzkit_ai_initialize_meta_ignores_non_initialize_payload(
+        self,
+    ) -> None:
+        payload = {"jsonrpc": "2.0", "id": 1, "result": {"success": True}}
+
+        result = ac.inject_houzzkit_ai_initialize_meta(
+            payload,
+            {"local_timezone": "Asia/Shanghai"},
+        )
+
+        self.assertEqual(
+            result,
+            {"jsonrpc": "2.0", "id": 1, "result": {"success": True}},
+        )
 
     def test_managed_kind_schema_uses_json_schema_array_enum(self) -> None:
         # MCP 会把 voluptuous schema 转为 JSON Schema；enum 必须来自 list，
@@ -1322,6 +1368,60 @@ class AutomationProtocolTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(config["actions"][0]["action"], "text.set_value")
         self.assertEqual(config["actions"][0]["data"]["value"], "{喝水}")
+
+    def test_notify_requires_voice_text_entity_without_plain_text_fallback(self) -> None:
+        errors: list[str] = []
+        action = {"action": "houzzkit_ai.notify", "data": {"message": "喝水"}}
+
+        with patch.object(
+            ia,
+            "get_entities",
+            return_value=[
+                _plain_text_entry("text.houzzkit_c3a8_otasheng_ji_di_zhi", "OTA升级地址")
+            ],
+        ):
+            result = ia._convert_houzzkit_notify_action(
+                _speaker_intent(),
+                action,
+                errors,
+                path="automation.actions[0]",
+            )
+
+        self.assertEqual(result, [])
+        self.assertEqual(
+            errors,
+            [
+                "automation.actions[0]: no voice text entity found for speaker: "
+                "speaker-1; text entities: text.houzzkit_c3a8_otasheng_ji_di_zhi"
+            ],
+        )
+
+    def test_notify_selects_voice_text_entity_among_plain_text_entries(self) -> None:
+        errors: list[str] = []
+        action = {"action": "houzzkit_ai.notify", "data": {"message": "喝水"}}
+
+        with patch.object(
+            ia,
+            "get_entities",
+            return_value=[
+                _plain_text_entry("text.houzzkit_c3a8_otasheng_ji_di_zhi", "OTA升级地址"),
+                _plain_text_entry("text.houzzkit_c3a8_zui_xin_ban_ben_hao", "最新版本号"),
+                _voice_text_entry("text.houzzkit_c3a8_bo_fang_yu_yin"),
+            ],
+        ):
+            result = ia._convert_houzzkit_notify_action(
+                _speaker_intent(),
+                action,
+                errors,
+                path="automation.actions[0]",
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            result[0]["target"]["entity_id"],
+            "text.houzzkit_c3a8_bo_fang_yu_yin",
+        )
+        self.assertEqual(result[0]["data"]["value"], "{喝水}")
 
     def test_warn_keeps_static_text_value(self) -> None:
         errors: list[str] = []
