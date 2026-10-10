@@ -17,8 +17,7 @@ _LOGGER = logging.getLogger(__name__)
 class WsTransport:
     """Handles WebSocket transport."""
     _transport_type = ""
-    _recv_binary = False
-
+    
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, endpoint: str, attr_endpoint: str, logger=None):
         self.stop_event = asyncio.Event()
         self.endpoint = endpoint
@@ -29,25 +28,24 @@ class WsTransport:
         self._idle_timeout = 180
         self._last_activity_time = 0
         self._is_connected = False
-
+        
         self.hass = hass
         self.entry = entry
         self.logger = logger or _LOGGER
         self._connection_lock = asyncio.Lock()
-
+        
         self._recv_writer: MemoryObjectSendStream = None # type: ignore
         self._recv_reader: MemoryObjectReceiveStream = None # type: ignore
         self._send_writer: MemoryObjectSendStream = None # type: ignore
         self._send_reader: MemoryObjectReceiveStream = None # type: ignore
-
-        self.init()
-
-    def init(self):
-        pass
-
+        
     @property
     def available(self):
         return not self.stop_event.is_set() and self.should_reconnect
+        
+
+    def init(self):
+        pass
 
     def update_activity_time(self):
         self._last_activity_time = time.monotonic()
@@ -59,7 +57,7 @@ class WsTransport:
     @property
     def is_connected(self):
         return self._is_connected and self._current_ws and not self._current_ws.closed
-
+    
     def clear_endpoint_from_data(self):
         if self.entry.data.get(self.attr_endpoint, "") == self.endpoint:
             self.logger.info("Clearing endpoint from config entry data: %s %s", self.attr_endpoint, self.endpoint)
@@ -73,7 +71,7 @@ class WsTransport:
         if not self.should_reconnect:
             self.logger.info("Interrupted before ensure connected")
             return False
-
+        
         if self.is_connected:
             self.update_activity_time()
             return True
@@ -89,8 +87,8 @@ class WsTransport:
 
             self.logger.info("On-demand connecting to WebSocket: %s", self.endpoint)
             self.update_activity_time()
-
-            self.entry.async_create_background_task(
+            
+            task = self.entry.async_create_background_task(
                 self.hass,
                 self.run_connection_loop(),
                 f"transport_loop:{self._transport_type}"
@@ -107,7 +105,7 @@ class WsTransport:
 
             self.logger.error("Timed out waiting for WebSocket connection")
             return False
-
+        
     async def _create_streams(self):
         """Create memory object streams for communication."""
         self._recv_writer, self._recv_reader = anyio.create_memory_object_stream(0)
@@ -137,7 +135,7 @@ class WsTransport:
         if not self.endpoint:
             self.logger.error("No endpoint configured in config entry")
             return False
-
+        
         if not self.should_reconnect:
             # 提前终止
             self.logger.info("Interrupted before connect")
@@ -223,7 +221,7 @@ class WsTransport:
                 self.update_activity_time()
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     await self._process_text_message(msg)
-                elif msg.type == aiohttp.WSMsgType.BINARY and self._recv_binary:
+                elif msg.type == aiohttp.WSMsgType.BINARY:
                     await self._recv_writer.send(msg.data)
                 elif msg.type == aiohttp.WSMsgType.CLOSE:
                     self.logger.error("WebSocket closed: %s", msg.extra)
@@ -319,7 +317,7 @@ class WsTransport:
         if self.stop_event.is_set():
             return
         self.stop_event.set()
-
+        
         self.logger.info("Stop begin, reason: '%s'", reason)
         self.should_reconnect = False
         self._is_connected = False

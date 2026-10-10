@@ -160,23 +160,6 @@ class EsphomeLight(EsphomeEntity[LightInfo, LightState], LightEntity):
     _native_supported_color_modes: tuple[ESPHomeColorMode, ...]
     _supports_color_mode = False
 
-    def _color_temp_to_cold_warm(self, color_temp_mired: float) -> tuple[float, float]:
-        """Convert a color temperature in mireds to cold/warm white fractions.
-
-        Returns (cold_white, warm_white) normalized so the brighter channel
-        is 1.0.
-        """
-        static_info = self._static_info
-        min_mireds = static_info.min_mireds
-        max_mireds = static_info.max_mireds
-        if max_mireds <= min_mireds:
-            return 1.0, 1.0
-        color_temp_clamped = min(max(color_temp_mired, min_mireds), max_mireds)
-        ww_frac = (color_temp_clamped - min_mireds) / (max_mireds - min_mireds)
-        cw_frac = 1 - ww_frac
-        max_frac = max(cw_frac, ww_frac)
-        return cw_frac / max_frac, ww_frac / max_frac
-
     @property
     @esphome_state_property
     def is_on(self) -> bool:
@@ -258,22 +241,12 @@ class EsphomeLight(EsphomeEntity[LightInfo, LightState], LightEntity):
 
         if (color_temp_k := kwargs.get(ATTR_COLOR_TEMP_KELVIN)) is not None:
             # Do not use kelvin_to_mired here to prevent precision loss
-            color_temp_mired = 1_000_000.0 / color_temp_k
-            data["color_temperature"] = color_temp_mired
+            data["color_temperature"] = 1000000.0 / color_temp_k
             if color_temp_modes := _filter_color_modes(
                 color_modes, LightColorCapability.COLOR_TEMPERATURE
             ):
                 color_modes = color_temp_modes
             else:
-                # Also send explicit cold/warm white values to avoid
-                # ESPHome applying brightness to both master brightness
-                # and white channels (b² effect). The firmware skips
-                # deriving cwww from color_temperature when the channels
-                # are already set explicitly, but still stores
-                # color_temperature so HA can read it back.
-                data["cold_white"], data["warm_white"] = self._color_temp_to_cold_warm(
-                    color_temp_mired
-                )
                 color_modes = _filter_color_modes(
                     color_modes, LightColorCapability.COLD_WARM_WHITE
                 )
@@ -326,7 +299,8 @@ class EsphomeLight(EsphomeEntity[LightInfo, LightState], LightEntity):
         return round(self._state.brightness * 255)
 
     @property
-    def color_mode(self) -> ColorMode:
+    @esphome_state_property
+    def color_mode(self) -> str:
         """Return the color mode of the light."""
         if not self._supports_color_mode:
             supported_color_modes = self.supported_color_modes
@@ -372,13 +346,19 @@ class EsphomeLight(EsphomeEntity[LightInfo, LightState], LightEntity):
             self._native_supported_color_modes, LightColorCapability.COLD_WARM_WHITE
         ):
             # Try to reverse white + color temp to cwww
+            static_info = self._static_info
+            min_ct = static_info.min_mireds
+            max_ct = static_info.max_mireds
+            color_temp = min(max(state.color_temperature, min_ct), max_ct)
             white = state.white
-            cw, ww = self._color_temp_to_cold_warm(state.color_temperature)
+
+            ww_frac = (color_temp - min_ct) / (max_ct - min_ct)
+            cw_frac = 1 - ww_frac
 
             return (
                 *rgb,
-                round(white * cw * 255),
-                round(white * ww * 255),
+                round(white * cw_frac / max(cw_frac, ww_frac) * 255),
+                round(white * ww_frac / max(cw_frac, ww_frac) * 255),
             )
         return (
             *rgb,

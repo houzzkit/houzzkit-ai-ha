@@ -36,6 +36,7 @@ def _get_exposed_entities(
     area_registry = ar.async_get(hass)
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
+        
     interesting_attributes = {
         "temperature",
         "current_temperature",
@@ -74,34 +75,26 @@ def _get_exposed_entities(
             continue
 
         entity_entry = entity_registry.async_get(state.entity_id)
-        device_entry = (
-            device_registry.async_get(entity_entry.device_id)
-            if entity_entry is not None and entity_entry.device_id is not None
-            else None
-        )
-        names = intent.async_get_entity_aliases(hass, entity_entry, state=state)
+        names = [state.name]
         area_names = []
 
         if entity_entry is not None:
-            if (
-                entity_entry.area_id is not None
-                and (area_entry := area_registry.async_get_area(entity_entry.area_id))
-                is not None
+            names.extend(entity_entry.aliases)
+            if entity_entry.area_id and (
+                area := area_registry.async_get_area(entity_entry.area_id)
             ):
                 # Entity is in area
-                area_names.append(area_entry.name)
-                area_names.extend(area_entry.aliases)
-            elif device_entry is not None:
+                area_names.append(area.name)
+                area_names.extend(area.aliases)
+            elif entity_entry.device_id and (
+                device := device_registry.async_get(entity_entry.device_id)
+            ):
                 # Check device area
-                if (
-                    device_entry.area_id is not None
-                    and (
-                        area_entry := area_registry.async_get_area(device_entry.area_id)
-                    )
-                    is not None
+                if device.area_id and (
+                    area := area_registry.async_get_area(device.area_id)
                 ):
-                    area_names.append(area_entry.name)
-                    area_names.extend(area_entry.aliases)
+                    area_names.append(area.name)
+                    area_names.extend(area.aliases)
 
         info: dict[str, Any] = {
             "names": ", ".join(names),
