@@ -40,7 +40,7 @@ class HouzzkitConversationEntity(BaseEntity):
             entry_type=dr.DeviceEntryType.SERVICE,
         )
 
-    
+
     @property
     def supported_languages(self):
         """Return a list of supported languages."""

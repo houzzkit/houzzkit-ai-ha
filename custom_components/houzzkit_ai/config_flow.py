@@ -17,28 +17,35 @@ from aioesphomeapi import (
     InvalidEncryptionKeyAPIError,
     RequiresEncryptionAPIError,
     ResolveAPIError,
+    wifi_mac_to_bluetooth_mac,
 )
 import aiohttp
+import asyncio
 import voluptuous as vol
 
 from homeassistant.components import zeroconf
 from homeassistant.config_entries import (
+    SOURCE_ESPHOME,
     SOURCE_IGNORE,
     SOURCE_REAUTH,
     SOURCE_RECONFIGURE,
     ConfigEntry,
     ConfigEntryBaseFlow,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
-    OptionsFlow,
+    FlowType,
+    OptionsFlowWithReload,
 )
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import AbortFlow
-from homeassistant.helpers import selector
+from homeassistant.data_entry_flow import AbortFlow, FlowResultType
+from homeassistant.helpers import selector, discovery_flow
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.importlib import async_import_module
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
+from homeassistant.helpers.service_info.esphome import ESPHomeServiceInfo
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from homeassistant.helpers.service_info.mqtt import MqttServiceInfo
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
@@ -59,7 +66,7 @@ from .dashboard import async_get_or_create_dashboard_manager, async_set_dashboar
 from .encryption_key_storage import async_get_encryption_key_storage
 from .entry_data import ESPHomeConfigEntry
 from .manager import async_replace_device
-from .houzzkit import Dict, get_haid
+from .houzzkit import Dict, get_haid, generate_qr_code
 from .houzzkit.http import async_setup_https
 
 ERROR_REQUIRES_ENCRYPTION_KEY = "requires_encryption_key"
@@ -99,7 +106,6 @@ class BaseFlow(ConfigEntryBaseFlow):
         self.this_data.pop(self.setup_uuid, None)
         self._extra.pop("setup_uuid", None)
 
-
 class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
     """Handle a esphome config flow."""
 
@@ -107,10 +113,12 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
 
     _reauth_entry: ConfigEntry
     _reconfig_entry: ConfigEntry
+    _wait_task: asyncio.Task | None = None
 
     def __init__(self) -> None:
         """Initialize flow."""
         self._host: str | None = None
+        self._connected_address: str | None = None
         self.__name: str | None = None
         self._port: int | None = None
         self._password: str | None = None
@@ -153,120 +161,135 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
 
     async def async_step_qrcode(self, user_input=None):
         await async_setup_https(self.hass)
-        errors = {}
-        schema = {}
-        haid = await get_haid(self.hass)
-        reconfig_entry = None
-        if getattr(self, "_reauth_entry", None):
-            reconfig_entry = self._reauth_entry
-        elif getattr(self, "_reconfig_entry", None):
-            reconfig_entry = self._reconfig_entry
-
+        if not self._wait_task:
+            self._wait_task = self.hass.async_create_task(self._wait_for_setup_data())
+        if self._wait_task.done():
+            return self.async_show_progress_done(next_step_id="qrcode_done")
         if not self.setup_uuid:
             self.setup_uuid = ulid.ulid_hex()
-        else:
-            if user_input is None:
-                user_input = {}
-                
-            _LOGGER.info("setup_data: %s", self.setup_data)
-            config_type = self.setup_data.get("config_type", "device") if self.setup_data else None
-            mcp_endpoint = self.setup_data.get("mcp_endpoint") if self.setup_data else None
-            _LOGGER.info("mcp_endpoint: %s", mcp_endpoint)
-
-            if config_type == "device":
-                self._host = self.setup_data[CONF_HOST]
-                port = self.setup_data.get(CONF_PORT, 6053)
-                try:
-                    self._port = int(port)
-                except (TypeError, ValueError):
-                    self._port = 6053
-                    _LOGGER.exception(f"Invalid port value '{port}', using default 6053")
-                self._noise_psk = self.setup_data.get(CONF_NOISE_PSK)
-                error = await self.fetch_device_info()
-                self._name = self.setup_data.get("speak_name") or self._name
-                if error:
-                    errors["base"] = error
-                elif not user_input.get("submit_confirm"):
-                    self._extra.tip = "\n".join([
-                        "设备信息如下:",
-                        f"**名称**: {self._name}",
-                        f"**IP**: {self._host}"
-                        f"**MAC**: {self._device_mac}",
-                    ])
-                    schema = {
-                        vol.Required("submit_confirm", default=True): selector.BooleanSelector(),
-                    }
-                else:
-                    self._extra.config_data = {
-                        "config_type": config_type,
-                        "uuid": self.setup_uuid,
-                        "mac": self._device_mac,
-                        "speak_id": self.setup_data.get("speak_id"),
-                        "mcp_endpoint": mcp_endpoint,
-                    }
-                    self.clean_setup()
-                    return await self._async_authenticate_or_add()
-
-            if config_type == "assist":
-                config_data = {
-                    "config_type": config_type,
-                    "uuid": self.setup_uuid,
-                    "speak_id": self.setup_data.get("speak_id"),
-                    CONF_DEVICE_NAME: self.setup_data.get("speak_name", ""),
-                    "mcp_endpoint": mcp_endpoint,
-                    "llm_endpoint": self.setup_data.get("llm_endpoint"),
-                    "stt_endpoint": self.setup_data.get("stt_endpoint"),
-                    "tts_endpoint": self.setup_data.get("tts_endpoint"),
-                }
-                if entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
-                    reconfig_entry = entry
-                    _LOGGER.info("Found existing entry for %s", entry.title)
-                
-                if reconfig_entry:
-                    _LOGGER.debug("Update existing entry: %s", config_data)
-                    return self.async_update_reload_and_abort(reconfig_entry, data=config_data)
-
-                await self.async_set_unique_id(haid)
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title="Houzzkit AI",
-                    data=config_data,
-                )
-
-        internal = get_url(self.hass, prefer_external=False)
-        if not self._extra.tip:
-            haip = internal.split("//")[1].split(":")[0]
-            self._extra.tip = "\n".join([
-                f"您的 HomeAssistant 局域网IP地址为: **{haip}**",
-            ])
         params = {
-            "haid": haid,
+            "haid": await get_haid(self.hass),
             "uuid": self.setup_uuid,
             "home_name": self.hass.config.location_name,
         }
+        reconfig_entry = self._get_reconfig_entry()
         if reconfig_entry and reconfig_entry.data.get("mac"):
             params.update({
                 "mac": reconfig_entry.data.get("mac"),
                 "speak_id": reconfig_entry.data.get("speak_id"),
             })
-        return self.async_show_form(
+        external = get_url(self.hass, prefer_external=True)
+        internal = get_url(self.hass, prefer_external=False) or external
+        haip = internal.split("//")[1].split(":")[0]
+        image = generate_qr_code(f"{internal}/api/houzzkit-ai/setup/qrcode?{urlencode(params)}")
+        self._extra.tip = "\n".join([
+            f"您的 HomeAssistant 局域网IP地址为: **{haip}**",
+            f"\n{image}",
+        ])
+        return self.async_show_progress(
             step_id="qrcode",
-            errors=errors,
-            data_schema=vol.Schema(
-                schema or {
-                    vol.Optional("qrcode"): selector.QrCodeSelector(
-                        config=selector.QrCodeSelectorConfig(
-                            data=f"{internal}/api/houzzkit-ai/setup/qrcode?{urlencode(params)}",
-                            scale=5,
-                            error_correction_level=selector.QrErrorCorrectionLevel.QUARTILE,
-                        ),
-                    ),
-                },
-            ),
+            progress_action="qrcode",
             description_placeholders={
                 "tip": self._extra.pop("tip", ""),
             },
+            progress_task=self._wait_task,
         )
+
+    async def async_step_qrcode_done(self, user_input=None):
+        errors = {}
+        schema = {}
+        haid = await get_haid(self.hass)
+        if user_input is None:
+            user_input = {}
+
+        _LOGGER.info("setup_data: %s", self.setup_data)
+        config_type = self.setup_data.get("config_type", "device") if self.setup_data else None
+        mcp_endpoint = self.setup_data.get("mcp_endpoint") if self.setup_data else None
+        _LOGGER.info("mcp_endpoint: %s", mcp_endpoint)
+
+        if config_type == "device":
+            self._name = self.setup_data.get("speak_name") or self._name
+            self._host = self.setup_data[CONF_HOST]
+            port = self.setup_data.get(CONF_PORT, 6053)
+            try:
+                self._port = int(port)
+            except (TypeError, ValueError):
+                self._port = 6053
+                _LOGGER.exception(f"Invalid port value '{port}', using default 6053")
+            self._noise_psk = self.setup_data.get(CONF_NOISE_PSK)
+            error = await self.fetch_device_info()
+            if error:
+                errors["base"] = error
+            elif not user_input.get("submit_confirm"):
+                self._extra.tip = "\n".join([
+                    "设备信息如下:",
+                    f"**名称**: {self._name}",
+                    f"**IP**: {self._host}"
+                    f"**MAC**: {self._device_mac}",
+                ])
+                schema = {
+                    vol.Required("submit_confirm", default=True): selector.BooleanSelector(),
+                }
+            else:
+                self._extra.config_data = {
+                    "config_type": config_type,
+                    "uuid": self.setup_uuid,
+                    "mac": self._device_mac,
+                    "speak_id": self.setup_data.get("speak_id"),
+                    "mcp_endpoint": mcp_endpoint,
+                }
+                self.clean_setup()
+                return await self._async_authenticate_or_add()
+
+        if config_type == "assist":
+            config_data = {
+                "config_type": config_type,
+                "uuid": self.setup_uuid,
+                "speak_id": self.setup_data.get("speak_id"),
+                CONF_DEVICE_NAME: self.setup_data.get("speak_name", ""),
+                "mcp_endpoint": mcp_endpoint,
+                "llm_endpoint": self.setup_data.get("llm_endpoint"),
+                "stt_endpoint": self.setup_data.get("stt_endpoint"),
+                "tts_endpoint": self.setup_data.get("tts_endpoint"),
+            }
+            reconfig_entry = self._get_reconfig_entry()
+            if entry := self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, haid):
+                reconfig_entry = entry
+                _LOGGER.info("Found existing entry for %s", entry.title)
+            if reconfig_entry:
+                _LOGGER.debug("Update existing entry: %s", config_data)
+                return self.async_update_reload_and_abort(reconfig_entry, data=config_data)
+
+            await self.async_set_unique_id(haid)
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(
+                title="Houzzkit AI",
+                data=config_data,
+            )
+
+        if schema:
+            return self.async_show_form(
+                step_id="qrcode_done",
+                errors=errors,
+                data_schema=vol.Schema(schema),
+                description_placeholders={
+                    "tip": self._extra.pop("tip", ""),
+                },
+            )
+        return self.async_step_qrcode_done(user_input)
+
+    async def _wait_for_setup_data(self):
+        while True:
+            if self.setup_data:
+                break
+            await asyncio.sleep(0.3)
+
+    def _get_reconfig_entry(self):
+        if getattr(self, "_reauth_entry", None):
+            return self._reauth_entry
+        if getattr(self, "_reconfig_entry", None):
+            return self._reconfig_entry
+        return None
 
     async def async_step_reauth(
         self, entry_data: Mapping[str, Any]
@@ -435,6 +458,24 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
 
         # Check if already configured
         await self.async_set_unique_id(mac_address)
+
+        # Convert WiFi MAC to Bluetooth MAC and notify Improv BLE if waiting
+        # ESPHome devices use WiFi MAC + 1 for Bluetooth MAC
+        # Late import to avoid circular dependency
+        # NOTE: Do not change to hass.config.components check - improv_ble is
+        # config_flow only and may not be in the components registry
+        if improv_ble := await async_import_module(
+            self.hass, "homeassistant.components.improv_ble"
+        ):
+            ble_mac = wifi_mac_to_bluetooth_mac(mac_address)
+            improv_ble.async_register_next_flow(self.hass, ble_mac, self.flow_id)
+            _LOGGER.debug(
+                "Notified Improv BLE of flow %s for BLE MAC %s (derived from WiFi MAC %s)",
+                self.flow_id,
+                ble_mac,
+                mac_address,
+            )
+
         await self._async_validate_mac_abort_configured(
             mac_address, self._host, self._port
         )
@@ -460,6 +501,11 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         if configured_host == host and (port is None or configured_port == port):
             # Don't probe to verify the mac is correct since
             # the host matches (and port matches if provided).
+            raise AbortFlow("already_configured")
+        # If the entry is loaded and the device is currently connected,
+        # don't update the host. This prevents transient mDNS announcements
+        # (e.g., during WiFi mesh roaming) from overwriting a working connection.
+        if entry.state is ConfigEntryState.LOADED and entry.runtime_data.available:
             raise AbortFlow("already_configured")
         configured_psk: str | None = entry.data.get(CONF_NOISE_PSK)
         await self._fetch_device_info(host, port or configured_port, configured_psk)
@@ -541,7 +587,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle DHCP discovery."""
         mac_address = format_mac(discovery_info.macaddress)
-        await self.async_set_unique_id(format_mac(mac_address))
+        await self.async_set_unique_id(mac_address)
         await self._async_validate_mac_abort_configured(
             mac_address, discovery_info.ip, None
         )
@@ -618,21 +664,77 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle creating a new entry by removing the old one and creating new."""
         assert self._entry_with_name_conflict is not None
+        if self.source in (SOURCE_REAUTH, SOURCE_RECONFIGURE):
+            return self.async_update_reload_and_abort(
+                self._entry_with_name_conflict,
+                title=self._name,
+                unique_id=self.unique_id,
+                data=self._async_make_config_data(),
+                options={
+                    CONF_ALLOW_SERVICE_CALLS: DEFAULT_NEW_CONFIG_ALLOW_ALLOW_SERVICE_CALLS,
+                },
+            )
         await self.hass.config_entries.async_remove(
             self._entry_with_name_conflict.entry_id
         )
-        return self._async_create_entry()
+        return await self._async_create_entry()
 
-    @callback
-    def _async_create_entry(self) -> ConfigFlowResult:
+    async def _async_create_entry(self) -> ConfigFlowResult:
         """Create the config entry."""
         assert self._name is not None
+        assert self._device_info is not None
+
+        # Check if Z-Wave capabilities are present and start discovery flow
+        next_flow_id: str | None = None
+        # If the zwave_home_id is not set, we don't know if it's a fresh
+        # adapter, or the cable is just unplugged. So only start
+        # the zwave_js config flow automatically if there is a
+        # zwave_home_id present. If it's a fresh adapter, the manager
+        # will handle starting the flow once it gets the home id changed
+        # request from the ESPHome device.
+        if (
+            self._device_info.zwave_proxy_feature_flags
+            and self._device_info.zwave_home_id
+        ):
+            assert self._connected_address is not None
+            assert self._port is not None
+
+            # Start Z-Wave discovery flow and get the flow ID
+            zwave_result = await self.hass.config_entries.flow.async_init(
+                "zwave_js",
+                context={
+                    "source": SOURCE_ESPHOME,
+                    "discovery_key": discovery_flow.DiscoveryKey(
+                        domain=DOMAIN,
+                        key=self._device_info.mac_address,
+                        version=1,
+                    ),
+                },
+                data=ESPHomeServiceInfo(
+                    name=self._device_info.name,
+                    zwave_home_id=self._device_info.zwave_home_id,
+                    ip_address=self._connected_address,
+                    port=self._port,
+                    noise_psk=self._noise_psk,
+                ),
+            )
+            if zwave_result["type"] in (
+                FlowResultType.ABORT,
+                FlowResultType.CREATE_ENTRY,
+            ):
+                _LOGGER.debug(
+                    "Unable to continue created Z-Wave JS config flow: %s", zwave_result
+                )
+            else:
+                next_flow_id = zwave_result["flow_id"]
+
         return self.async_create_entry(
             title=self._name,
             data=self._async_make_config_data(),
             options={
                 CONF_ALLOW_SERVICE_CALLS: DEFAULT_NEW_CONFIG_ALLOW_ALLOW_SERVICE_CALLS,
             },
+            next_flow=(FlowType.CONFIG_FLOW, next_flow_id) if next_flow_id else None,
         )
 
     @callback
@@ -680,7 +782,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
             if entry.data.get(CONF_DEVICE_NAME) == self._device_name:
                 self._entry_with_name_conflict = entry
                 return await self.async_step_name_conflict()
-        return self._async_create_entry()
+        return await self._async_create_entry()
 
     async def _async_reauth_validated_connection(self) -> ConfigFlowResult:
         """Handle reauth validated connection."""
@@ -827,6 +929,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         try:
             await cli.connect()
             self._device_info = await cli.device_info()
+            self._connected_address = cli.connected_address
         except InvalidAuthAPIError:
             return ERROR_INVALID_PASSWORD_AUTH
         except RequiresEncryptionAPIError:
@@ -960,7 +1063,7 @@ class ConfigFlowHandler(ConfigFlow, BaseFlow, domain=DOMAIN):
         return OptionsFlowHandler()
 
 
-class OptionsFlowHandler(OptionsFlow):
+class OptionsFlowHandler(OptionsFlowWithReload):
     """Handle a option flow for esphome."""
 
     async def async_step_init(
@@ -984,6 +1087,4 @@ class OptionsFlowHandler(OptionsFlow):
                 ): bool,
             }
         )
-        defaults = dict(self.config_entry.options)
-        data_schema = self.add_suggested_values_to_schema(data_schema, defaults)
         return self.async_show_form(step_id="init", data_schema=data_schema)

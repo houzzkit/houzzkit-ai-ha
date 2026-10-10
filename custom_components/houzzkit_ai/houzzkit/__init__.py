@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 from ..const import DOMAIN
@@ -29,7 +30,7 @@ def get_entry_data(hass, entry, field=None, set_default=None, pop=False):
     else:
         domain_data = hass.data.setdefault(DOMAIN, {})
         data = domain_data.setdefault(entry.entry_id, {})
-        
+
     if field and pop:
         return data.pop(field, None)
     if field and set_default is not None:
@@ -67,3 +68,23 @@ def EntryAuthFailedError(hass, entry):
         translation_key="houzzkit_auth_error",
         translation_placeholders={"name": entry.title},
     )
+
+
+def generate_qr_code(data: str):
+    """Generate a base64 PNG string represent QR Code image of data."""
+    import pyqrcode  # noqa: PLC0415
+    qr_code = pyqrcode.create(data)
+    with io.BytesIO() as buffer:
+        qr_code.svg(file=buffer, scale=4, module_color="#FFFFFF", background="#000000")
+        return str(
+            buffer.getvalue()
+            .decode("ascii")
+            .replace("\n", "")
+            .replace(
+                (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<svg xmlns="http://www.w3.org/2000/svg"'
+                ),
+                "<svg",
+            )
+        )

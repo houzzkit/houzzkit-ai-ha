@@ -15,16 +15,16 @@
             "reauth_unique_id_changed": "**Re-authentication of `{name}` was aborted** because the address `{host}` points to a different device: `{unexpected_device_name}` (MAC: `{unexpected_mac}`) instead of the expected one (MAC: `{expected_mac}`).",
             "reconfigure_already_configured": "A device `{name}` with MAC address `{mac}` is already configured as `{title}`. Reconfiguration was aborted because the new configuration appears to refer to a different device.",
             "reconfigure_name_conflict": "**Reconfiguration of `{name}` was aborted** because the address `{host}` points to a device named `{name}` (MAC: `{expected_mac}`), which is already in use by another configuration entry: `{existing_title}`.",
-            "reconfigure_successful": "Re-configuration was successful",
+            "reconfigure_successful": "Reconfiguration was successful",
             "reconfigure_unique_id_changed": "**Reconfiguration of `{name}` was aborted** because the address `{host}` points to a different device: `{unexpected_device_name}` (MAC: `{unexpected_mac}`) instead of the expected one (MAC: `{expected_mac}`).",
             "service_received": "Action received"
         },
         "error": {
-            "connection_error": "Unable to connect to the ESPHome device. Make sure the device’s YAML configuration includes an `api` section.",
+            "connection_error": "Unable to connect to the device. Make sure the device’s YAML configuration includes an `api` section.",
             "invalid_auth": "Invalid authentication",
             "invalid_psk": "The encryption key is invalid. Make sure it matches the value in the device’s YAML configuration under `api -> encryption -> key`.",
-            "requires_encryption_key": "The ESPHome device requires an encryption key. Enter the key defined in the device’s YAML configuration under `api -> encryption -> key`.",
-            "resolve_error": "Unable to resolve the address of the ESPHome device. If this issue continues, consider setting a static IP address."
+            "requires_encryption_key": "The device requires an encryption key. Enter the key defined in the device’s YAML configuration under `api -> encryption -> key`.",
+            "resolve_error": "Unable to resolve the address of the device. If this issue continues, consider setting a static IP address."
         },
         "flow_title": "{name}",
         "step": {
@@ -65,7 +65,7 @@
                 "data_description": {
                     "noise_psk": "The encryption key is used to encrypt the connection between Home Assistant and the device. You can find this in the api: section of your device YAML configuration."
                 },
-                "description": "The device `{name}` enabled transport encryption or changed the encryption key. Please enter the updated key. You can find it in the ESPHome Dashboard or in your ESPHome device YAML configuration."
+                "description": "The device `{name}` enabled transport encryption or changed the encryption key. Please enter the updated key. You can find it in the Dashboard or in your device YAML configuration."
             },
             "reauth_encryption_removed_confirm": {
                 "description": "The device `{name}` disabled transport encryption. Please confirm that you want to remove the encryption key and allow unencrypted connections."
@@ -81,12 +81,15 @@
                 },
                 "description": "Please enter connection settings of your device."
             },
-            "qrcode": {
+            "qrcode_done": {
                 "description": "{tip}",
                 "data": {
                     "submit_confirm": "Confirmed"
                 }
             }
+        },
+        "progress": {
+            "qrcode": "{tip}"
         }
     },
     "entity": {
@@ -108,7 +111,13 @@
         },
         "select": {
             "pipeline": {
-                "name": "Assistant{index}",
+                "name": "Assistant",
+                "state": {
+                    "preferred": "Preferred"
+                }
+            },
+            "pipeline_n": {
+                "name": "Assistant {index}",
                 "state": {
                     "preferred": "Preferred"
                 }
@@ -122,7 +131,14 @@
                 }
             },
             "wake_word": {
-                "name": "Wake word{index}",
+                "name": "Wake word",
+                "state": {
+                    "no_wake_word": "No wake word",
+                    "okay_nabu": "Okay Nabu"
+                }
+            },
+            "wake_word_n": {
+                "name": "Wake word {index}",
                 "state": {
                     "no_wake_word": "No wake word",
                     "okay_nabu": "Okay Nabu"
@@ -134,14 +150,17 @@
         "action_call_failed": {
             "message": "Failed to execute the action call {call_name} on {device_name}: {error}"
         },
+        "action_call_timeout": {
+            "message": "Timeout waiting for response from action call {call_name} on {device_name}"
+        },
         "error_communicating_with_device": {
             "message": "Error communicating with the device {device_name}: {error}"
         },
         "error_compiling": {
-            "message": "Error compiling {configuration}. Try again in ESPHome dashboard for more information."
+            "message": "Error compiling {configuration}. Try again in dashboard for more information."
         },
         "error_uploading": {
-            "message": "Error during OTA (Over-The-Air) update of {configuration}. Try again in ESPHome dashboard for more information."
+            "message": "Error during OTA (Over-The-Air) update of {configuration}. Try again in dashboard for more information."
         },
         "houzzkit_auth_error": {
             "message": "{name} Auth failed, please reconfigure."
@@ -166,7 +185,7 @@
             "title": "{integration_name} in progress binary sensors are deprecated"
         },
         "ble_firmware_outdated": {
-            "description": "To improve Bluetooth reliability and performance, we highly recommend updating {name} with ESPHome {version} or later. When updating the device from ESPHome earlier than 2022.12.0, it is recommended to use a serial cable instead of an over-the-air update to take advantage of the new partition scheme.",
+            "description": "ESPHome {version} introduces ultra-low latency event processing, reducing BLE event delays from 0-16 milliseconds to approximately 12 microseconds. This resolves stability issues when pairing, connecting, or handshaking with devices that require low latency, and makes Bluetooth proxy operations rival or exceed local adapters. We highly recommend updating {name} to take advantage of these improvements.",
             "title": "Update {name} with ESPHome {version} or later"
         },
         "device_conflict": {
