@@ -9,11 +9,13 @@ from homeassistant.components.button.const import \
 from homeassistant.components.cover.const import DOMAIN as COVER_DOMAIN
 from homeassistant.components.input_button import DOMAIN as INPUT_BUTTON_DOMAIN
 from homeassistant.components.lock.const import DOMAIN as LOCK_DOMAIN
+from homeassistant.components.switch.const import DOMAIN as SWITCH_DOMAIN
 from homeassistant.components.valve.const import DOMAIN as VALVE_DOMAIN
 from homeassistant.const import (ATTR_ENTITY_ID, SERVICE_CLOSE_COVER,
                                  SERVICE_CLOSE_VALVE, SERVICE_LOCK,
                                  SERVICE_OPEN_COVER, SERVICE_OPEN_VALVE,
-                                 SERVICE_TURN_ON, SERVICE_UNLOCK)
+                                 SERVICE_TURN_OFF, SERVICE_TURN_ON,
+                                 SERVICE_UNLOCK, STATE_OFF, STATE_ON)
 from homeassistant.core import State
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as intent
@@ -39,9 +41,16 @@ class TurnDeviceIntentBase(intent.IntentHandler):
         # Execute operation.
         control_targets = []
         entity_key_map = set() # for deduplication
+        processed_switches: set[str] = set()
         for item in candidate_entities:
-            _LOGGER.info(f"Operate target: area={item.area_name} name={item.name} id={item.entity.id}")
-            await self.handle_match_target(intent_obj, item.state, service)
+            if (
+                item.state.domain != SWITCH_DOMAIN
+                or item.state.entity_id not in processed_switches
+            ):
+                _LOGGER.info(f"Operate target: area={item.area_name} name={item.name} id={item.entity.id}")
+                await self.handle_match_target(intent_obj, item.state, service)
+                if item.state.domain == SWITCH_DOMAIN:
+                    processed_switches.add(item.state.entity_id)
             
             entity_key = f"{item.area_name}-{item.name}"
             if entity_key not in entity_key_map:
@@ -141,6 +150,19 @@ class TurnDeviceIntentBase(intent.IntentHandler):
             raise intent.IntentHandleError(
                 f"Service {service} does not support entity {state.entity_id}"
             )
+
+        if state.domain == SWITCH_DOMAIN:
+            current_state = hass.states.get(state.entity_id)
+            current_value = (
+                current_state.state if current_state is not None else "missing"
+            )
+            already_at_target = (
+                service == SERVICE_TURN_ON and current_value == STATE_ON
+            ) or (
+                service == SERVICE_TURN_OFF and current_value == STATE_OFF
+            )
+            if already_at_target:
+                return
         
         # Fall back to homeassistant.turn_on/off
         service_data: dict[str, Any] = {ATTR_ENTITY_ID: state.entity_id}
@@ -199,7 +221,7 @@ class TurnDeviceOnIntent(TurnDeviceIntentBase):
     async def async_handle(self, intent_obj: intent.Intent) -> JsonObjectType: # type: ignore
         """Get the current state of exposed entities."""
         slots = self.async_validate_slots(intent_obj.slots)
-        _LOGGER.info(f"TurnDeviceOff slots={slots}")
+        _LOGGER.info(f"TurnDeviceOn slots={slots}")
         return await super()._async_handle(intent_obj, slots, "turn_on")
 
 
@@ -220,4 +242,3 @@ class TurnDeviceOffIntent(TurnDeviceIntentBase):
         slots = self.async_validate_slots(intent_obj.slots)
         _LOGGER.info(f"TurnDeviceOff slots={slots}")
         return await super()._async_handle(intent_obj, slots, "turn_off")
-    
