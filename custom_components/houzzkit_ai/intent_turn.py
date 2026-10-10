@@ -161,13 +161,6 @@ class TurnDeviceIntentBase(intent.IntentHandler):
             ) or (
                 service == SERVICE_TURN_OFF and current_value == STATE_OFF
             )
-            _LOGGER.warning(
-                "Switch control: entity_id=%s service=%s current_state=%s action=%s",
-                state.entity_id,
-                service,
-                current_value,
-                "skip" if already_at_target else "execute",
-            )
             if already_at_target:
                 return
         

@@ -136,42 +136,23 @@ class IntentTurnTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(value=value, service=service):
                 self.services.async_call.reset_mock()
                 self.states["switch.water"] = FakeState("switch.water", value)
-                with self.assertLogs(intent_turn._LOGGER, logging.WARNING) as logs:
-                    result = await self.handle_candidates(
-                        [self.candidate("switch.water", value)], service
-                    )
+                result = await self.handle_candidates(
+                    [self.candidate("switch.water", value)], service
+                )
                 self.services.async_call.assert_not_called()
                 self.assertEqual(result, {
                     "success": True,
                     "control_targets": [{"name": "开关", "area": "厨房"}],
                 })
-                self.assertEqual(logs.records[0].getMessage(), (
-                    f"Switch control: entity_id=switch.water service={service} "
-                    f"current_state={value} action=skip"
-                ))
 
-    async def test_warning_precedes_normal_service_call(self):
+    async def test_normal_service_call(self):
         for value, service in (("on", "turn_off"), ("off", "turn_on")):
             with self.subTest(value=value, service=service):
                 self.services.async_call.reset_mock()
                 self.states["switch.water"] = FakeState("switch.water", value)
-                observed_at_call = []
-                with self.assertLogs(intent_turn._LOGGER, logging.WARNING) as logs:
-                    async def check_log_before_call(*args, **kwargs):
-                        observed_at_call.append([
-                            (record.levelno, record.getMessage())
-                            for record in logs.records
-                        ])
-
-                    self.services.async_call.side_effect = check_log_before_call
-                    await self.handler.handle_match_target(
-                        self.intent, FakeState("switch.water", value), service
-                    )
-                self.assertEqual(observed_at_call, [[(
-                    logging.WARNING,
-                    f"Switch control: entity_id=switch.water service={service} "
-                    f"current_state={value} action=execute",
-                )]])
+                await self.handler.handle_match_target(
+                    self.intent, FakeState("switch.water", value), service
+                )
                 self.services.async_call.assert_awaited_once_with(
                     "switch", service, {"entity_id": "switch.water"},
                     context=self.intent.context, blocking=True,
@@ -187,10 +168,9 @@ class IntentTurnTest(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(service=service, latest=latest):
                     self.services.async_call.reset_mock()
                     self.states["switch.water"] = FakeState("switch.water", latest)
-                    with self.assertLogs(intent_turn._LOGGER, logging.WARNING):
-                        await self.handler.handle_match_target(
-                            self.intent, FakeState("switch.water", snapshot), service
-                        )
+                    await self.handler.handle_match_target(
+                        self.intent, FakeState("switch.water", snapshot), service
+                    )
                     self.assertEqual(self.services.async_call.await_count, int(should_call))
 
     async def test_unknown_unavailable_and_missing_do_not_skip(self):
@@ -201,13 +181,10 @@ class IntentTurnTest(unittest.IsolatedAsyncioTestCase):
                     self.states.clear()
                     if latest is not None:
                         self.states["switch.water"] = FakeState("switch.water", latest)
-                    with self.assertLogs(intent_turn._LOGGER, logging.WARNING) as logs:
-                        await self.handler.handle_match_target(
-                            self.intent, FakeState("switch.water", snapshot), service
-                        )
+                    await self.handler.handle_match_target(
+                        self.intent, FakeState("switch.water", snapshot), service
+                    )
                     self.services.async_call.assert_awaited_once()
-                    self.assertIn(f"current_state={latest or 'missing'}", logs.output[0])
-                    self.assertIn("action=execute", logs.output[0])
 
     async def test_duplicate_switches_and_mixed_targets(self):
         self.states.update({
@@ -222,8 +199,7 @@ class IntentTurnTest(unittest.IsolatedAsyncioTestCase):
             self.candidate("switch.idle", "off", "空闲开关"),
             self.candidate("light.kitchen", "off", "厨房灯"),
         ]
-        with self.assertLogs(intent_turn._LOGGER, logging.WARNING) as logs:
-            result = await self.handle_candidates(candidates, "turn_off")
+        result = await self.handle_candidates(candidates, "turn_off")
         self.assertEqual(self.services.async_call.await_count, 2)
         self.assertEqual(
             [call.args[:3] for call in self.services.async_call.await_args_list],
@@ -232,7 +208,6 @@ class IntentTurnTest(unittest.IsolatedAsyncioTestCase):
                 ("light", "turn_off", {"entity_id": "light.kitchen"}),
             ],
         )
-        self.assertEqual(len(logs.records), 2)
         self.assertEqual(result, {
             "success": True,
             "control_targets": [
@@ -244,10 +219,9 @@ class IntentTurnTest(unittest.IsolatedAsyncioTestCase):
     async def test_deduplication_is_limited_to_one_request(self):
         candidates = [self.candidate("switch.water", "on")]
         self.states["switch.water"] = FakeState("switch.water", "on")
-        with self.assertLogs(intent_turn._LOGGER, logging.WARNING):
-            await self.handle_candidates(candidates, "turn_off")
-            self.states["switch.water"] = FakeState("switch.water", "off")
-            await self.handle_candidates(candidates, "turn_on")
+        await self.handle_candidates(candidates, "turn_off")
+        self.states["switch.water"] = FakeState("switch.water", "off")
+        await self.handle_candidates(candidates, "turn_on")
         self.assertEqual(
             [call.args[1] for call in self.services.async_call.await_args_list],
             ["turn_off", "turn_on"],
